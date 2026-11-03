@@ -9,7 +9,7 @@ measurement data and the paper material live in
 [EwoutsAgents/explicit-fast-attach-dev](https://github.com/EwoutsAgents/explicit-fast-attach-dev).
 
 Generated from explicit-fast-attach-dev branch `upgrade/esphome-2026.10-idf-5.5.6`,
-commit `3fef6eb4`.
+commit `008da86e`.
 
 ## Use
 
@@ -32,6 +32,7 @@ external_components:
 | `thread_fast_attach` | Fast-Attach (OpenThread PR #13121; ED and routers) |
 | `thread_fast_attach_ucast_32` | 32 ms unicast variant (not in the paper) |
 | `thread_parent_response_delay_log` | logging-only router diagnostic |
+| `thread_ping` | pings the ED's current parent (RTT, RSS, loss); needs no OpenThread patch |
 
 `thread_openthread_source` is loaded automatically. On the first compile it copies
 ESP-IDF's `openthread` component into the device's own build folder and patches only
