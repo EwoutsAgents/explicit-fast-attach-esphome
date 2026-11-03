@@ -10,12 +10,19 @@ are applied to a copy.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
+
+try:  # POSIX (Linux, macOS, the Home Assistant add-on); no locking elsewhere
+    import fcntl
+except ImportError:  # pragma: no cover
+    fcntl = None
 
 # ---- Tested versions (one place) --------------------------------------------------
 TESTED_ESPHOME_SERIES = "2026.10"           # any 2026.10.x
@@ -111,19 +118,62 @@ def verify_source(source_component: Path) -> None:
         )
 
 
+def tree_manifest_sha256(component: Path) -> str:
+    """sha256 over every file's relative path and size in the copied component.
+
+    Cheap enough to check on every compile, and it catches a copy that lost files
+    (for example `linker.lf`) after it was prepared.
+    """
+    h = hashlib.sha256()
+    for root, dirs, files in os.walk(component):
+        dirs.sort()
+        for name in sorted(files):
+            path = Path(root, name)
+            h.update(f"{path.relative_to(component).as_posix()}\0{path.stat().st_size}\0".encode())
+    return h.hexdigest()
+
+
 def is_current(target_dir: Path, group: str) -> bool:
-    """True if `target_dir` already holds this group's override from the current patches."""
+    """True if `target_dir` holds a complete override for this group from the current patches."""
     try:
         provenance = json.loads((target_dir / "PROVENANCE.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
-    return (
+    if not (
         provenance.get("group") == group
         and provenance.get("openthread_base_content_sha256") == PRISTINE_CONTENT_SHA256
         and provenance.get("patches") == patch_hashes(group)
         and provenance.get("mtd_config_defines") == GROUPS[group]["mtd_defines"]
         and (target_dir / "openthread" / "CMakeLists.txt").is_file()
-    )
+    ):
+        return False
+    try:
+        return provenance.get("tree_manifest_sha256") == tree_manifest_sha256(target_dir / "openthread")
+    except OSError:
+        return False
+
+
+@contextlib.contextmanager
+def _lock(target_dir: Path):
+    """Serialise preparation of one group's copy between concurrent compiles."""
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
+    if fcntl is None:
+        yield
+        return
+    with open(target_dir.parent / f".{target_dir.name}.lock", "w", encoding="utf-8") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def ensure(group: str, source_component: Path, target_dir: Path, *, repo_revision: dict | None = None) -> tuple[dict, bool]:
+    """Return (provenance, prepared_now): reuse a complete copy, else prepare one. Concurrency-safe."""
+    with _lock(target_dir):
+        if is_current(target_dir, group):
+            return json.loads((target_dir / "PROVENANCE.json").read_text(encoding="utf-8")), False
+        return prepare(group, source_component, target_dir, repo_revision=repo_revision), True
 
 
 def _git_apply(ot_root: Path, patch: Path) -> None:
@@ -145,10 +195,14 @@ def prepare(group: str, source_component: Path, target_dir: Path, *, repo_revisi
     applied = patch_hashes(group)
     verify_source(source_component)
 
-    if target_dir.exists():
-        shutil.rmtree(target_dir)
-    target_dir.mkdir(parents=True)
-    component = target_dir / "openthread"
+    # Build the copy next to the target and swap it in at the end, so a build never
+    # sees a half-written or half-deleted folder.
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging = target_dir.parent / f".{target_dir.name}.staging-{os.getpid()}"
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir()
+    component = staging / "openthread"
     shutil.copytree(source_component, component, symlinks=True)
     # ESP-IDF's tarball keeps submodule `.git` pointer files whose targets don't exist;
     # drop them from the copy so `git apply` runs as a plain, repository-less patcher.
@@ -177,9 +231,18 @@ def prepare(group: str, source_component: Path, target_dir: Path, *, repo_revisi
         "patches": applied,
         "mtd_config_defines": spec["mtd_defines"],
         "patched_content_sha256": content_sha256(ot_root),
+        "tree_manifest_sha256": tree_manifest_sha256(component),
         "source_component": str(source_component),
         "repository": repo_revision,
         "created_utc": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
     }
-    (target_dir / "PROVENANCE.json").write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
+    (staging / "PROVENANCE.json").write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
+
+    retired = None
+    if target_dir.exists():
+        retired = target_dir.parent / f".{target_dir.name}.retired-{os.getpid()}"
+        os.replace(target_dir, retired)
+    os.replace(staging, target_dir)
+    if retired is not None:
+        shutil.rmtree(retired, ignore_errors=True)
     return provenance

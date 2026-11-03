@@ -168,7 +168,7 @@ def _prepare_override(group: str, root: str | None) -> tuple[Path, dict]:
         else:
             source = _esp_idf_openthread_component()
             _LOGGER.info("Preparing patched OpenThread (group %s) from %s", group, source)
-            provenance = ot_override.prepare(group, source, group_dir)
+            provenance, _ = ot_override.ensure(group, source, group_dir)
     except ot_override.OverrideError as err:
         raise EsphomeError(str(err)) from err
     return group_dir, provenance
