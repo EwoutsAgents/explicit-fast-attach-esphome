@@ -1,11 +1,15 @@
-# explicit-fast-attach-dev — ESPHome components (install branch)
+# explicit-fast-attach-esphome
 
-This branch contains only what ESPHome needs to install the components: `components/`
-and the OpenThread `patches/` they apply. Everything else (documentation, test harness,
-measurement data, paper material) lives on the development branches of
+ESPHome external components for Explicit Parent Switching on Thread end devices
+(Explicit-Attach and Explicit-Fast-Attach) and the OpenThread Fast Attach baseline.
+
+This repository contains only what ESPHome needs: `components/` and the OpenThread
+`patches/` they apply, so installs stay small. Documentation, the test harness,
+measurement data and the paper material live in
 [EwoutsAgents/explicit-fast-attach-dev](https://github.com/EwoutsAgents/explicit-fast-attach-dev).
 
-Generated from branch `upgrade/esphome-2026.10-idf-5.5.6`, commit `f4bd5055`.
+Generated from explicit-fast-attach-dev branch `upgrade/esphome-2026.10-idf-5.5.6`,
+commit `f4bd5055`.
 
 ## Use
 
@@ -17,7 +21,7 @@ esp32:
     version: 5.5.6          # required
 
 external_components:
-  - source: github://EwoutsAgents/explicit-fast-attach-dev@esphome
+  - source: github://EwoutsAgents/explicit-fast-attach-esphome
     components: [thread_openthread_source, thread_fast_attach_ucast_1]
 ```
 
