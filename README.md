@@ -9,7 +9,7 @@ measurement data and the paper material live in
 [EwoutsAgents/explicit-fast-attach-dev](https://github.com/EwoutsAgents/explicit-fast-attach-dev).
 
 Generated from explicit-fast-attach-dev branch `upgrade/esphome-2026.10-idf-5.5.6`,
-commit `ab3ba802`.
+commit `3fef6eb4`.
 
 ## Use
 
