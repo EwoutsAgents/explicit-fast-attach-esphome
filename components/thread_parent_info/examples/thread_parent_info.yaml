@@ -1,0 +1,19 @@
+# Example usage when this component is added to:
+# https://github.com/EwoutsAgents/explicit-fast-attach-esphome
+
+external_components:
+  - source: github://EwoutsAgents/explicit-fast-attach-esphome
+    components: [thread_parent_info]
+
+# Required elsewhere in your device YAML:
+# openthread:
+#   device_type: MTD
+#   tlv: "<PUT_YOUR_TLV_HERE>"
+
+text_sensor:
+  - platform: thread_parent_info
+    update_interval: 30s
+    parent_extaddr:
+      name: "Parent Extended Address"
+    parent_rloc16:
+      name: "Parent RLOC16"
