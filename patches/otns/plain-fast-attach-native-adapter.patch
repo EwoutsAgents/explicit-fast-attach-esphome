@@ -1,0 +1,138 @@
+diff --git a/examples/apps/cli/main.c b/examples/apps/cli/main.c
+index d13ed203c..5ecebc1a5 100644
+--- a/examples/apps/cli/main.c
++++ b/examples/apps/cli/main.c
+@@ -37,7 +37,10 @@
+ 
+ #include <openthread/cli.h>
+ #include <openthread/diag.h>
++#include <openthread/thread.h>
+ #include <openthread/tasklet.h>
++#include <openthread/platform/alarm-micro.h>
++#include <openthread/platform/logging.h>
+ #include <openthread/platform/misc.h>
+ 
+ #include "openthread-system.h"
+@@ -53,6 +56,51 @@
+  */
+ extern void otAppCliInit(otInstance *aInstance);
+ 
++#if OPENTHREAD_CONFIG_MLE_FAST_ATTACH_ENABLE && OPENTHREAD_CONFIG_MLE_FAST_ATTACH_AUTO_ARM_AFTER_DETACH_ENABLE && \
++    !OPENTHREAD_FTD
++static bool sFastAttachObservedAttached;
++static bool sFastAttachDetachHandled;
++
++static void HandleFastAttachStateChanged(otChangedFlags aFlags, void *aContext)
++{
++    otInstance   *instance = (otInstance *)aContext;
++    otDeviceRole  role;
++
++    if ((aFlags & OT_CHANGED_THREAD_ROLE) == 0)
++    {
++        return;
++    }
++
++    role = otThreadGetDeviceRole(instance);
++
++    if (role >= OT_DEVICE_ROLE_CHILD)
++    {
++        bool enabled = otThreadIsFastAttachEnabled(instance);
++
++        sFastAttachObservedAttached = true;
++        sFastAttachDetachHandled    = false;
++        otPlatLog(OT_LOG_LEVEL_NOTE, OT_LOG_REGION_API,
++                  "FAST_ATTACH event=attached_seen time_us=%lu role=%u enabled=%u",
++                  (unsigned long)otPlatAlarmMicroGetNow(), role, enabled);
++    }
++    else if ((role == OT_DEVICE_ROLE_DETACHED) && sFastAttachObservedAttached && !sFastAttachDetachHandled)
++    {
++        otError error;
++        bool    enabled;
++
++        otPlatLog(OT_LOG_LEVEL_NOTE, OT_LOG_REGION_API,
++                  "FAST_ATTACH event=detached_seen time_us=%lu role=%u",
++                  (unsigned long)otPlatAlarmMicroGetNow(), role);
++        error   = otThreadSetFastAttachEnabled(instance, true);
++        enabled = otThreadIsFastAttachEnabled(instance);
++        sFastAttachDetachHandled = true;
++        otPlatLog(OT_LOG_LEVEL_NOTE, OT_LOG_REGION_API,
++                  "FAST_ATTACH event=arm_after_detach time_us=%lu role=%u api_error=%u enabled=%u",
++                  (unsigned long)otPlatAlarmMicroGetNow(), role, error, enabled);
++    }
++}
++#endif
++
+ #if OPENTHREAD_CONFIG_HEAP_EXTERNAL_ENABLE
+ OT_TOOL_WEAK void *otPlatCAlloc(size_t aNum, size_t aSize) { return calloc(aNum, aSize); }
+ 
+@@ -139,6 +187,13 @@ pseudo_reset:
+ 
+     otAppCliInit(instance);
+ 
++#if OPENTHREAD_CONFIG_MLE_FAST_ATTACH_ENABLE && OPENTHREAD_CONFIG_MLE_FAST_ATTACH_AUTO_ARM_AFTER_DETACH_ENABLE && \
++    !OPENTHREAD_FTD
++    sFastAttachObservedAttached = false;
++    sFastAttachDetachHandled    = false;
++    assert(otSetStateChangedCallback(instance, HandleFastAttachStateChanged, instance) == OT_ERROR_NONE);
++#endif
++
+ #if OPENTHREAD_POSIX && !defined(FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION)
+     IgnoreError(otCliSetUserCommands(kCommands, OT_ARRAY_LENGTH(kCommands), instance));
+ #endif
+diff --git a/src/core/config/mle.h b/src/core/config/mle.h
+index 38ec3bd90..a79b4f422 100644
+--- a/src/core/config/mle.h
++++ b/src/core/config/mle.h
+@@ -362,6 +362,10 @@
+ #define OPENTHREAD_CONFIG_MLE_FAST_ATTACH_ENABLE 1
+ #endif
+ 
++#ifndef OPENTHREAD_CONFIG_MLE_FAST_ATTACH_AUTO_ARM_AFTER_DETACH_ENABLE
++#define OPENTHREAD_CONFIG_MLE_FAST_ATTACH_AUTO_ARM_AFTER_DETACH_ENABLE 0
++#endif
++
+ /**
+  * @}
+  */
+diff --git a/src/core/thread/mle.cpp b/src/core/thread/mle.cpp
+index 0c53c978a..2d0835eaa 100644
+--- a/src/core/thread/mle.cpp
++++ b/src/core/thread/mle.cpp
+@@ -5050,6 +5050,8 @@ void Mle::Attacher::SendParentRequest(ParentRequestType aType)
+     {
+         scanMask |= ScanMaskTlv::kFastAttachFlag;
+     }
++    LogNote("FAST_ATTACH event=parent_request_sent scan_mask=0x%02x enabled=%u", scanMask,
++            Get<Mle>().mFastAttachEnabled);
+ #endif
+ 
+     VerifyOrExit((message = Get<Mle>().NewMleMessage(kCommandParentRequest)) != nullptr, error = kErrorNoBufs);
+@@ -5193,6 +5195,9 @@ Error Mle::Attacher::SendChildIdRequest(void)
+     destination.InitAsLinkLocalAddress(mParentCandidate.GetExtAddress());
+     SuccessOrExit(error = message->SendTo(destination));
+ 
++    LogNote("FAST_ATTACH event=child_id_request parent=%s enabled=%u",
++            mParentCandidate.GetExtAddress().ToString().AsCString(), Get<Mle>().mFastAttachEnabled);
++
+     Log(kMessageSend,
+         (mAddressRegistrationMode == kAppendMeshLocalOnly) ? kTypeChildIdRequestShort : kTypeChildIdRequest,
+         destination);
+@@ -5476,7 +5481,10 @@ void Mle::Attacher::HandleParentResponse(RxInfo &aRxInfo)
+     if (Get<Mle>().mFastAttachEnabled && mState == kStateParentRequest &&
+         mParentCandidate.GetTwoWayLinkQuality() == kLinkQuality3 && HasAcceptableParentCandidate())
+     {
++        LogNote("FAST_ATTACH event=acceptable_lq3_response parent=%s",
++                mParentCandidate.GetExtAddress().ToString().AsCString());
+         mTimer.Start(0);
++        LogNote("FAST_ATTACH event=early_timer_zero");
+     }
+ #endif
+ 
+@@ -5581,6 +5589,7 @@ void Mle::Attacher::HandleChildIdResponse(RxInfo &aRxInfo)
+     // One-shot semantics: clear Fast Attach intent on successful attach so the
+     // application must re-enable per attempt.
+     Get<Mle>().mFastAttachEnabled = false;
++    LogNote("FAST_ATTACH event=attached_clear enabled=0");
+ #endif
+ 
+     if (!Get<Mle>().IsRxOnWhenIdle())

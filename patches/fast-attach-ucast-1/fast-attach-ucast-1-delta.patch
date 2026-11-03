@@ -1,0 +1,95 @@
+diff --git a/include/openthread/preferred_parent.h b/include/openthread/preferred_parent.h
+index 00e53bad9..e2df2f212 100644
+--- a/include/openthread/preferred_parent.h
++++ b/include/openthread/preferred_parent.h
+@@ -66,6 +66,7 @@ typedef struct otThreadPreferredParentConfig
+     otExtAddress                 mExtAddress;
+     otThreadPreferredParentMode mMode;
+     uint8_t                      mMaxAttempts;
++    bool                         mFastAttach; ///< Arm one-shot Fast Attach for this directed operation.
+     uint32_t                     mRetryInterval; ///< Parent Response wait/retry interval in milliseconds.
+     uint32_t                     mAttachTimeout; ///< Child ID Response timeout in milliseconds.
+ } otThreadPreferredParentConfig;
+diff --git a/src/core/thread/mle.cpp b/src/core/thread/mle.cpp
+index 7dc93316d..6544783be 100644
+--- a/src/core/thread/mle.cpp
++++ b/src/core/thread/mle.cpp
+@@ -4617,6 +4617,13 @@ void Mle::Attacher::FinishPreferredParent(otThreadPreferredParentState  aState,
+                                            Error                         aError,
+                                            otThreadPreferredParentEvent  aEvent)
+ {
++    if ((aState != OT_THREAD_PREFERRED_PARENT_STATE_SUCCEEDED) && Get<Mle>().mFastAttachEnabled)
++    {
++        Get<Mle>().mFastAttachEnabled = false;
++        LogNote("FAST_ATTACH_UCAST_1 terminal_state=%u fast_attach_armed=0",
++                static_cast<unsigned>(aState));
++    }
++
+     mTimer.Stop();
+     SetState(kStateIdle);
+     RestorePreferredParentRxState();
+@@ -4672,6 +4679,7 @@ Error Mle::Attacher::StartPreferredParent(const otThreadPreferredParentConfig &a
+     mPreferredParentStatus.mAttempt     = 0;
+     mPreferredParentStatus.mMaxAttempts = aConfig.mMaxAttempts;
+     mPreferredParentStatus.mError       = kErrorNone;
++    Get<Mle>().mFastAttachEnabled       = aConfig.mFastAttach;
+     EmitPreferredParentEvent(OT_THREAD_PREFERRED_PARENT_EVENT_REQUESTED);
+     BeginPreferredParentAttempt();
+ 
+@@ -5290,7 +5298,8 @@ void Mle::Attacher::SendParentRequest(ParentRequestType aType)
+     // Set the F flag to request fast-attach behavior from responding Routers.
+     // Suppressed in opportunistic background scans (kBetterPartition / kBetterParent) where
+     // the "first acceptable wins" policy could regress parent-quality selection.
+-    if (Get<Mle>().mFastAttachEnabled && mMode != kBetterPartition && mMode != kBetterParent)
++    if (Get<Mle>().mFastAttachEnabled && mMode != kBetterPartition &&
++        (mMode != kBetterParent || IsPreferredParentActive()))
+     {
+         scanMask |= ScanMaskTlv::kFastAttachFlag;
+     }
+diff --git a/src/core/thread/mle_ftd.cpp b/src/core/thread/mle_ftd.cpp
+index 48fbeb4a8..89610f37f 100644
+--- a/src/core/thread/mle_ftd.cpp
++++ b/src/core/thread/mle_ftd.cpp
+@@ -1532,6 +1532,10 @@ void Mle::HandleParentRequest(RxInfo &aRxInfo)
+     DeviceMode         mode;
+     uint32_t           delay;
+     uint32_t           maxDelay;
++    uint8_t            activeRouterCount = 0;
++    uint8_t            effectiveRouterCount = 0;
++    bool               isFastAttach = false;
++    bool               isUnicastParentRequest = false;
+     ParentResponseInfo info;
+ 
+     Log(kMessageReceive, kTypeParentRequest, aRxInfo.mMessageInfo.GetPeerAddr());
+@@ -1604,12 +1608,28 @@ void Mle::HandleParentRequest(RxInfo &aRxInfo)
+ 
+     maxDelay = !ScanMaskTlv::IsEndDeviceFlagSet(scanMask) ? kParentResponseMaxDelayRouters : kParentResponseMaxDelayAll;
+ 
+-    if (ScanMaskTlv::IsFastAttachFlagSet(scanMask) && IsRouterOrLeader())
++    isFastAttach = ScanMaskTlv::IsFastAttachFlagSet(scanMask) && IsRouterOrLeader();
++    isUnicastParentRequest = !aRxInfo.mMessageInfo.GetSockAddr().IsMulticast();
++
++    if (isFastAttach)
+     {
+-        maxDelay = Min(maxDelay, mRouterTable.GetActiveRouterCount() * kFastAttachJitterPerRouter);
++        activeRouterCount    = mRouterTable.GetActiveRouterCount();
++        effectiveRouterCount = isUnicastParentRequest ? 1 : activeRouterCount;
++        maxDelay             = Min(maxDelay, effectiveRouterCount * kFastAttachJitterPerRouter);
++        if (isUnicastParentRequest)
++        {
++            // Eliminate jitter for this directed Fast Attach response.
++            maxDelay = 1;
++        }
+     }
+ 
+-    delay = GenerateRandomDelay(maxDelay);
++    delay = (isFastAttach && isUnicastParentRequest) ? 1 : GenerateRandomDelay(maxDelay);
++    if (isFastAttach)
++    {
++        LogNote("FAST_ATTACH_UCAST_1 unicast=%u active_routers=%u effective_routers=%u max_delay_ms=%lu delay_ms=%lu",
++                isUnicastParentRequest, activeRouterCount, effectiveRouterCount,
++                ToUlong(maxDelay), ToUlong(delay));
++    }
+     mDelayedSender.ScheduleParentResponse(info, delay);
+ 
+ exit:

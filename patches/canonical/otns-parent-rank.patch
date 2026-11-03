@@ -1,0 +1,165 @@
+diff --git a/src/core/thread/mle.cpp b/src/core/thread/mle.cpp
+index cf3c3904fbe548b8363df4dc37138f327cde3d70..9216cec04632a52ade34983b0465566792e45582 100644
+--- a/src/core/thread/mle.cpp
++++ b/src/core/thread/mle.cpp
+@@ -5161,35 +5161,97 @@ bool Mle::Attacher::IsBetterParent(uint16_t                aRloc16,
+ 
+     // Mesh Impacting Criteria
+     rval = ThreeWayCompare(LinkQualityForLinkMargin(aTwoWayLinkMargin), mParentCandidate.GetTwoWayLinkQuality());
+-    VerifyOrExit(rval == 0);
++    if (rval != 0)
++    {
++        LogInfo("ParentRank: d=%s c=tw_lq r=0x%04x i=0x%04x v=%u iv=%u lm=%u im=%u",
++                (rval > 0) ? "accept" : "reject", aRloc16, mParentCandidate.GetRloc16(),
++                LinkQualityForLinkMargin(aTwoWayLinkMargin), mParentCandidate.GetTwoWayLinkQuality(),
++                aTwoWayLinkMargin, mParentCandidate.mLinkMargin);
++        ExitNow();
++    }
+ 
+     rval = ThreeWayCompare(IsRouterRloc16(aRloc16), IsRouterRloc16(mParentCandidate.GetRloc16()));
+-    VerifyOrExit(rval == 0);
++    if (rval != 0)
++    {
++        LogInfo("ParentRank: d=%s c=router r=0x%04x i=0x%04x v=%u iv=%u lm=%u im=%u",
++                (rval > 0) ? "accept" : "reject", aRloc16, mParentCandidate.GetRloc16(),
++                IsRouterRloc16(aRloc16) ? 1 : 0, IsRouterRloc16(mParentCandidate.GetRloc16()) ? 1 : 0,
++                aTwoWayLinkMargin, mParentCandidate.mLinkMargin);
++        ExitNow();
++    }
+ 
+     rval = ThreeWayCompare(aConnectivity.GetParentPriority(), mParentCandidate.mConnectivity.GetParentPriority());
+-    VerifyOrExit(rval == 0);
++    if (rval != 0)
++    {
++        LogInfo("ParentRank: d=%s c=priority r=0x%04x i=0x%04x v=%d iv=%d lm=%u im=%u",
++                (rval > 0) ? "accept" : "reject", aRloc16, mParentCandidate.GetRloc16(),
++                aConnectivity.GetParentPriority(), mParentCandidate.mConnectivity.GetParentPriority(), aTwoWayLinkMargin,
++                mParentCandidate.mLinkMargin);
++        ExitNow();
++    }
+ 
+     // Prefer the parent with highest quality links (Link Quality 3 field in Connectivity TLV) to neighbors
+     rval = ThreeWayCompare(aConnectivity.GetNumLinkQuality3(), mParentCandidate.mConnectivity.GetNumLinkQuality3());
+-    VerifyOrExit(rval == 0);
++    if (rval != 0)
++    {
++        LogInfo("ParentRank: d=%s c=lq3_count r=0x%04x i=0x%04x v=%u iv=%u lm=%u im=%u",
++                (rval > 0) ? "accept" : "reject", aRloc16, mParentCandidate.GetRloc16(),
++                aConnectivity.GetNumLinkQuality3(), mParentCandidate.mConnectivity.GetNumLinkQuality3(),
++                aTwoWayLinkMargin, mParentCandidate.mLinkMargin);
++        ExitNow();
++    }
+ 
+     // Thread 1.2 Specification 4.5.2.1.2 Child Impacting Criteria
+ 
+     rval = ThreeWayCompare(aVersion, mParentCandidate.GetVersion());
+-    VerifyOrExit(rval == 0);
++    if (rval != 0)
++    {
++        LogInfo("ParentRank: d=%s c=version r=0x%04x i=0x%04x v=%u iv=%u lm=%u im=%u",
++                (rval > 0) ? "accept" : "reject", aRloc16, mParentCandidate.GetRloc16(), aVersion,
++                mParentCandidate.GetVersion(), aTwoWayLinkMargin, mParentCandidate.mLinkMargin);
++        ExitNow();
++    }
+ 
+     rval = ThreeWayCompare(aConnectivity.GetSedBufferSize(), mParentCandidate.mConnectivity.GetSedBufferSize());
+-    VerifyOrExit(rval == 0);
++    if (rval != 0)
++    {
++        LogInfo("ParentRank: d=%s c=sed_buf r=0x%04x i=0x%04x v=%u iv=%u lm=%u im=%u",
++                (rval > 0) ? "accept" : "reject", aRloc16, mParentCandidate.GetRloc16(),
++                aConnectivity.GetSedBufferSize(), mParentCandidate.mConnectivity.GetSedBufferSize(), aTwoWayLinkMargin,
++                mParentCandidate.mLinkMargin);
++        ExitNow();
++    }
+ 
+     rval = ThreeWayCompare(aConnectivity.GetSedDatagramCount(), mParentCandidate.mConnectivity.GetSedDatagramCount());
+-    VerifyOrExit(rval == 0);
++    if (rval != 0)
++    {
++        LogInfo("ParentRank: d=%s c=sed_dgram r=0x%04x i=0x%04x v=%u iv=%u lm=%u im=%u",
++                (rval > 0) ? "accept" : "reject", aRloc16, mParentCandidate.GetRloc16(),
++                aConnectivity.GetSedDatagramCount(), mParentCandidate.mConnectivity.GetSedDatagramCount(),
++                aTwoWayLinkMargin, mParentCandidate.mLinkMargin);
++        ExitNow();
++    }
+ 
+     // Extra rules
+     rval = ThreeWayCompare(aConnectivity.GetNumLinkQuality2(), mParentCandidate.mConnectivity.GetNumLinkQuality2());
+-    VerifyOrExit(rval == 0);
++    if (rval != 0)
++    {
++        LogInfo("ParentRank: d=%s c=lq2_count r=0x%04x i=0x%04x v=%u iv=%u lm=%u im=%u",
++                (rval > 0) ? "accept" : "reject", aRloc16, mParentCandidate.GetRloc16(),
++                aConnectivity.GetNumLinkQuality2(), mParentCandidate.mConnectivity.GetNumLinkQuality2(),
++                aTwoWayLinkMargin, mParentCandidate.mLinkMargin);
++        ExitNow();
++    }
+ 
+     rval = ThreeWayCompare(aConnectivity.GetNumLinkQuality1(), mParentCandidate.mConnectivity.GetNumLinkQuality1());
+-    VerifyOrExit(rval == 0);
++    if (rval != 0)
++    {
++        LogInfo("ParentRank: d=%s c=lq1_count r=0x%04x i=0x%04x v=%u iv=%u lm=%u im=%u",
++                (rval > 0) ? "accept" : "reject", aRloc16, mParentCandidate.GetRloc16(),
++                aConnectivity.GetNumLinkQuality1(), mParentCandidate.mConnectivity.GetNumLinkQuality1(),
++                aTwoWayLinkMargin, mParentCandidate.mLinkMargin);
++        ExitNow();
++    }
+ 
+ #if OPENTHREAD_CONFIG_MAC_CSL_RECEIVER_ENABLE
+     // CSL metric
+@@ -5200,13 +5262,26 @@ bool Mle::Attacher::IsBetterParent(uint16_t                aRloc16,
+ 
+         // Smaller metric is better.
+         rval = ThreeWayCompare(candidateCslMetric, cslMetric);
+-        VerifyOrExit(rval == 0);
++        if (rval != 0)
++        {
++            LogInfo("ParentRank: d=%s c=csl_metric r=0x%04x i=0x%04x v=%lu iv=%lu lm=%u im=%u",
++                    (rval > 0) ? "accept" : "reject", aRloc16, mParentCandidate.GetRloc16(),
++                    ToUlong(static_cast<uint32_t>(cslMetric)), ToUlong(static_cast<uint32_t>(candidateCslMetric)),
++                    aTwoWayLinkMargin, mParentCandidate.mLinkMargin);
++            ExitNow();
++        }
+     }
+ #else
+     OT_UNUSED_VARIABLE(aCslAccuracy);
+ #endif
+ 
+     rval = ThreeWayCompare(aTwoWayLinkMargin, mParentCandidate.mLinkMargin);
++    if (rval != 0)
++    {
++        LogInfo("ParentRank: d=%s c=tw_margin r=0x%04x i=0x%04x v=%u iv=%u lm=%u im=%u",
++                (rval > 0) ? "accept" : "reject", aRloc16, mParentCandidate.GetRloc16(), aTwoWayLinkMargin,
++                mParentCandidate.mLinkMargin, aTwoWayLinkMargin, mParentCandidate.mLinkMargin);
++    }
+ 
+ exit:
+     return (rval > 0);
+@@ -5339,7 +5414,12 @@ void Mle::Attacher::HandleParentResponse(RxInfo &aRxInfo)
+         }
+ 
+         // Only consider partitions that are the same or better
+-        VerifyOrExit(compare >= 0);
++        if (compare < 0)
++        {
++            LogInfo("ParentRank: d=reject c=partition r=0x%04x i=0x%04x v=%d iv=0 lm=%u im=%u", sourceAddress,
++                    mParentCandidate.GetRloc16(), compare, twoWayLinkMargin, mParentCandidate.mLinkMargin);
++            ExitNow();
++        }
+ #endif
+ 
+         // Only consider better parents if the partitions are the same
+@@ -5347,6 +5427,11 @@ void Mle::Attacher::HandleParentResponse(RxInfo &aRxInfo)
+         {
+             VerifyOrExit(IsBetterParent(sourceAddress, twoWayLinkMargin, connectivity, version, cslAccuracy));
+         }
++        else
++        {
++            LogInfo("ParentRank: d=accept c=partition r=0x%04x i=0x%04x v=%d iv=0 lm=%u im=%u", sourceAddress,
++                    mParentCandidate.GetRloc16(), compare, twoWayLinkMargin, mParentCandidate.mLinkMargin);
++        }
+     }
+ 
+     SuccessOrExit(error = aRxInfo.mMessage.ReadFrameCounterTlvs(linkFrameCounter, mleFrameCounter));

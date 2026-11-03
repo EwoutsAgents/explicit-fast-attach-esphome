@@ -1,0 +1,743 @@
+diff --git a/include/openthread/preferred_parent.h b/include/openthread/preferred_parent.h
+new file mode 100644
+index 000000000..00e53bad9
+--- /dev/null
++++ b/include/openthread/preferred_parent.h
+@@ -0,0 +1,128 @@
++/*
++ * Copyright (c) 2026, The OpenThread Authors.
++ * All rights reserved.
++ *
++ * SPDX-License-Identifier: BSD-3-Clause
++ */
++
++#ifndef OPENTHREAD_PREFERRED_PARENT_H_
++#define OPENTHREAD_PREFERRED_PARENT_H_
++
++#include <stdint.h>
++#include <openthread/error.h>
++#include <openthread/instance.h>
++#include <openthread/thread.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef enum otThreadPreferredParentMode
++{
++    OT_THREAD_PREFERRED_PARENT_MODE_MULTICAST = 0,
++    OT_THREAD_PREFERRED_PARENT_MODE_UNICAST   = 1,
++} otThreadPreferredParentMode;
++
++typedef enum otThreadPreferredParentState
++{
++    OT_THREAD_PREFERRED_PARENT_STATE_IDLE = 0,
++    OT_THREAD_PREFERRED_PARENT_STATE_STARTING_DISCOVERY,
++    OT_THREAD_PREFERRED_PARENT_STATE_WAITING_PARENT_REQUEST,
++    OT_THREAD_PREFERRED_PARENT_STATE_WAITING_TARGET_RESPONSE,
++    OT_THREAD_PREFERRED_PARENT_STATE_CONTINUING_SELECTED_ATTACH,
++    OT_THREAD_PREFERRED_PARENT_STATE_WAITING_CHILD_ID_RESPONSE,
++    OT_THREAD_PREFERRED_PARENT_STATE_SUCCEEDED,
++    OT_THREAD_PREFERRED_PARENT_STATE_FAILED,
++    OT_THREAD_PREFERRED_PARENT_STATE_TIMED_OUT,
++    OT_THREAD_PREFERRED_PARENT_STATE_CANCELLED,
++} otThreadPreferredParentState;
++
++typedef enum otThreadPreferredParentResult
++{
++    OT_THREAD_PREFERRED_PARENT_RESULT_NONE = 0,
++    OT_THREAD_PREFERRED_PARENT_RESULT_SUCCESS,
++    OT_THREAD_PREFERRED_PARENT_RESULT_START_FAILED,
++    OT_THREAD_PREFERRED_PARENT_RESULT_TARGET_TIMEOUT,
++    OT_THREAD_PREFERRED_PARENT_RESULT_ATTACH_TIMEOUT,
++    OT_THREAD_PREFERRED_PARENT_RESULT_ROLE_CHANGED,
++    OT_THREAD_PREFERRED_PARENT_RESULT_CANCELLED,
++} otThreadPreferredParentResult;
++
++typedef enum otThreadPreferredParentEvent
++{
++    OT_THREAD_PREFERRED_PARENT_EVENT_REQUESTED = 0,
++    OT_THREAD_PREFERRED_PARENT_EVENT_PARENT_REQUEST_STARTED,
++    OT_THREAD_PREFERRED_PARENT_EVENT_TARGET_RESPONSE,
++    OT_THREAD_PREFERRED_PARENT_EVENT_CHILD_ID_REQUEST_STARTED,
++    OT_THREAD_PREFERRED_PARENT_EVENT_SUCCEEDED,
++    OT_THREAD_PREFERRED_PARENT_EVENT_FAILED,
++    OT_THREAD_PREFERRED_PARENT_EVENT_TIMED_OUT,
++    OT_THREAD_PREFERRED_PARENT_EVENT_CANCELLED,
++    OT_THREAD_PREFERRED_PARENT_EVENT_CLEARED,
++} otThreadPreferredParentEvent;
++
++typedef struct otThreadPreferredParentConfig
++{
++    otExtAddress                 mExtAddress;
++    otThreadPreferredParentMode mMode;
++    uint8_t                      mMaxAttempts;
++    uint32_t                     mRetryInterval; ///< Parent Response wait/retry interval in milliseconds.
++    uint32_t                     mAttachTimeout; ///< Child ID Response timeout in milliseconds.
++} otThreadPreferredParentConfig;
++
++typedef struct otThreadPreferredParentStatus
++{
++    otThreadPreferredParentState  mState;
++    otThreadPreferredParentResult mResult;
++    otThreadPreferredParentMode   mMode;
++    otExtAddress                  mExtAddress;
++    uint32_t                      mGeneration;
++    uint8_t                       mAttempt;
++    uint8_t                       mMaxAttempts;
++    otError                       mError;
++} otThreadPreferredParentStatus;
++
++typedef struct otThreadPreferredParentEventInfo
++{
++    otThreadPreferredParentEvent  mEvent;
++    otThreadPreferredParentStatus mStatus;
++    uint16_t                       mParentRloc16;
++    int8_t                         mParentRssi;
++} otThreadPreferredParentEventInfo;
++
++typedef void (*otThreadPreferredParentCallback)(const otThreadPreferredParentEventInfo *aEventInfo, void *aContext);
++
++/**
++ * Registers a synchronous, observational state/event callback.
++ *
++ * The callback runs from OpenThread processing context. It must not call a
++ * preferred-parent mutating API. Registering `NULL` removes the callback.
++ */
++otError otThreadPreferredParentSetCallback(otInstance                      *aInstance,
++                                            otThreadPreferredParentCallback aCallback,
++                                            void                            *aContext);
++
++/**
++ * Starts a switch from an attached child role.
++ *
++ * Returns `OT_ERROR_BUSY` when an attach or switch is already active,
++ * `OT_ERROR_INVALID_STATE` unless the device is a child, and
++ * `OT_ERROR_INVALID_ARGS` for invalid modes, timeouts, attempts, or all-zero/
++ * all-ones targets. Extended-address bytes use normal `otExtAddress` order.
++ */
++otError otThreadPreferredParentStart(otInstance *aInstance, const otThreadPreferredParentConfig *aConfig);
++
++/** Cancels an active operation while preserving the existing attachment. */
++otError otThreadPreferredParentCancel(otInstance *aInstance);
++
++/** Clears retained terminal status. Returns `OT_ERROR_BUSY` while active. */
++otError otThreadPreferredParentClear(otInstance *aInstance);
++
++/** Copies the current operation status. Terminal state persists until start or clear. */
++void    otThreadPreferredParentGetStatus(otInstance *aInstance, otThreadPreferredParentStatus *aStatus);
++
++#ifdef __cplusplus
++} // extern "C"
++#endif
++
++#endif // OPENTHREAD_PREFERRED_PARENT_H_
+diff --git a/src/core/api/thread_api.cpp b/src/core/api/thread_api.cpp
+index 3623fe721..e7cf9e4c7 100644
+--- a/src/core/api/thread_api.cpp
++++ b/src/core/api/thread_api.cpp
+@@ -37,6 +37,10 @@
+ 
+ #include "instance/instance.hpp"
+ 
++#if OPENTHREAD_CONFIG_EXPERIMENTAL_PREFERRED_PARENT_ENABLE
++#include <openthread/preferred_parent.h>
++#endif
++
+ using namespace ot;
+ 
+ uint32_t otThreadGetChildTimeout(otInstance *aInstance) { return AsCoreType(aInstance).Get<Mle::Mle>().GetTimeout(); }
+@@ -344,6 +348,50 @@ otError otThreadSearchForBetterParent(otInstance *aInstance)
+     return AsCoreType(aInstance).Get<Mle::Mle>().SearchForBetterParent();
+ }
+ 
++#if OPENTHREAD_CONFIG_EXPERIMENTAL_PREFERRED_PARENT_ENABLE
++otError otThreadPreferredParentSetCallback(otInstance                      *aInstance,
++                                            otThreadPreferredParentCallback aCallback,
++                                            void                            *aContext)
++{
++    if (aInstance == nullptr)
++    {
++        return OT_ERROR_INVALID_ARGS;
++    }
++
++    AsCoreType(aInstance).Get<Mle::Mle>().SetPreferredParentCallback(aCallback, aContext);
++    return OT_ERROR_NONE;
++}
++
++otError otThreadPreferredParentStart(otInstance *aInstance, const otThreadPreferredParentConfig *aConfig)
++{
++    if ((aInstance == nullptr) || (aConfig == nullptr))
++    {
++        return OT_ERROR_INVALID_ARGS;
++    }
++
++    return AsCoreType(aInstance).Get<Mle::Mle>().StartPreferredParent(*aConfig);
++}
++
++otError otThreadPreferredParentCancel(otInstance *aInstance)
++{
++    return (aInstance == nullptr) ? OT_ERROR_INVALID_ARGS
++                                  : AsCoreType(aInstance).Get<Mle::Mle>().CancelPreferredParent();
++}
++
++otError otThreadPreferredParentClear(otInstance *aInstance)
++{
++    return (aInstance == nullptr) ? OT_ERROR_INVALID_ARGS
++                                  : AsCoreType(aInstance).Get<Mle::Mle>().ClearPreferredParent();
++}
++
++void otThreadPreferredParentGetStatus(otInstance *aInstance, otThreadPreferredParentStatus *aStatus)
++{
++    AssertPointerIsNotNull(aInstance);
++    AssertPointerIsNotNull(aStatus);
++    AsCoreType(aInstance).Get<Mle::Mle>().GetPreferredParentStatus(*aStatus);
++}
++#endif
++
+ otError otThreadSetEnabled(otInstance *aInstance, bool aEnabled)
+ {
+     Error error = kErrorNone;
+diff --git a/src/core/config/preferred_parent.h b/src/core/config/preferred_parent.h
+new file mode 100644
+index 000000000..ebfe3117f
+--- /dev/null
++++ b/src/core/config/preferred_parent.h
+@@ -0,0 +1,15 @@
++/*
++ * Copyright (c) 2026, The OpenThread Authors.
++ * All rights reserved.
++ *
++ * SPDX-License-Identifier: BSD-3-Clause
++ */
++
++#ifndef CONFIG_PREFERRED_PARENT_H_
++#define CONFIG_PREFERRED_PARENT_H_
++
++#ifndef OPENTHREAD_CONFIG_EXPERIMENTAL_PREFERRED_PARENT_ENABLE
++#define OPENTHREAD_CONFIG_EXPERIMENTAL_PREFERRED_PARENT_ENABLE 0
++#endif
++
++#endif // CONFIG_PREFERRED_PARENT_H_
+diff --git a/src/core/openthread-core-config.h b/src/core/openthread-core-config.h
+index 576403d79..80864f82c 100644
+--- a/src/core/openthread-core-config.h
++++ b/src/core/openthread-core-config.h
+@@ -103,6 +103,7 @@
+ #include "config/parent_search.h"
+ #include "config/ping_sender.h"
+ #include "config/platform.h"
++#include "config/preferred_parent.h"
+ #include "config/power_calibration.h"
+ #include "config/radio_link.h"
+ #include "config/secure_transport.h"
+diff --git a/src/core/thread/mle.cpp b/src/core/thread/mle.cpp
+index 0c53c978a..7dc93316d 100644
+--- a/src/core/thread/mle.cpp
++++ b/src/core/thread/mle.cpp
+@@ -565,6 +565,27 @@ exit:
+     return error;
+ }
+ 
++#if OPENTHREAD_CONFIG_EXPERIMENTAL_PREFERRED_PARENT_ENABLE
++Error Mle::StartPreferredParent(const otThreadPreferredParentConfig &aConfig)
++{
++    return mAttacher.StartPreferredParent(aConfig);
++}
++
++Error Mle::CancelPreferredParent(void) { return mAttacher.CancelPreferredParent(); }
++
++Error Mle::ClearPreferredParent(void) { return mAttacher.ClearPreferredParent(); }
++
++void Mle::GetPreferredParentStatus(otThreadPreferredParentStatus &aStatus) const
++{
++    mAttacher.GetPreferredParentStatus(aStatus);
++}
++
++void Mle::SetPreferredParentCallback(otThreadPreferredParentCallback aCallback, void *aContext)
++{
++    mAttacher.SetPreferredParentCallback(aCallback, aContext);
++}
++#endif
++
+ bool Mle::IsAttached(void) const { return (IsChild() || IsRouter() || IsLeader()); }
+ 
+ bool Mle::IsRouterOrLeader(void) const { return (IsRouter() || IsLeader()); }
+@@ -4523,12 +4544,196 @@ Mle::Attacher::Attacher(Instance &aInstance)
+     , mChildIdRequestsRemaining(kMaxChildIdRequests)
+     , mAttachCounter(0)
+     , mAnnounceDelay(kAnnounceTimeout)
++#if OPENTHREAD_CONFIG_EXPERIMENTAL_PREFERRED_PARENT_ENABLE
++    , mPreferredParentCallback(nullptr)
++    , mPreferredParentCallbackContext(nullptr)
++    , mPreferredParentCandidateValid(false)
++    , mPreferredParentForcedRxOn(false)
++    , mPreferredParentWasRxOn(false)
++    , mPreferredParentCompletingChildIdResponse(false)
++#endif
+     , mTimer(aInstance)
+ {
+     mParentCandidate.Init(aInstance);
+     mParentCandidate.Clear();
++#if OPENTHREAD_CONFIG_EXPERIMENTAL_PREFERRED_PARENT_ENABLE
++    mPreferredParentCandidate.Init(aInstance);
++    mPreferredParentCandidate.Clear();
++    ClearAllBytes(mPreferredParentConfig);
++    ClearAllBytes(mPreferredParentStatus);
++    mPreferredParentStatus.mState  = OT_THREAD_PREFERRED_PARENT_STATE_IDLE;
++    mPreferredParentStatus.mResult = OT_THREAD_PREFERRED_PARENT_RESULT_NONE;
++    mPreferredParentStatus.mError  = kErrorNone;
++#endif
++}
++
++#if OPENTHREAD_CONFIG_EXPERIMENTAL_PREFERRED_PARENT_ENABLE
++bool Mle::Attacher::IsPreferredParentActive(void) const
++{
++    return (mPreferredParentStatus.mState >= OT_THREAD_PREFERRED_PARENT_STATE_STARTING_DISCOVERY) &&
++           (mPreferredParentStatus.mState <= OT_THREAD_PREFERRED_PARENT_STATE_WAITING_CHILD_ID_RESPONSE);
++}
++
++void Mle::Attacher::GetPreferredParentStatus(otThreadPreferredParentStatus &aStatus) const
++{
++    aStatus = mPreferredParentStatus;
++}
++
++void Mle::Attacher::SetPreferredParentCallback(otThreadPreferredParentCallback aCallback, void *aContext)
++{
++    mPreferredParentCallback        = aCallback;
++    mPreferredParentCallbackContext = aContext;
++}
++
++void Mle::Attacher::EmitPreferredParentEvent(otThreadPreferredParentEvent aEvent, uint16_t aRloc16, int8_t aRssi)
++{
++    otThreadPreferredParentEventInfo eventInfo;
++
++    VerifyOrExit(mPreferredParentCallback != nullptr);
++    ClearAllBytes(eventInfo);
++    eventInfo.mEvent        = aEvent;
++    eventInfo.mStatus       = mPreferredParentStatus;
++    eventInfo.mParentRloc16 = aRloc16;
++    eventInfo.mParentRssi   = aRssi;
++    mPreferredParentCallback(&eventInfo, mPreferredParentCallbackContext);
++
++exit:
++    return;
++}
++
++void Mle::Attacher::RestorePreferredParentRxState(void)
++{
++    if (mPreferredParentForcedRxOn && !mPreferredParentWasRxOn)
++    {
++        Get<MeshForwarder>().SetRxOnWhenIdle(false);
++    }
++
++    mPreferredParentForcedRxOn = false;
++    mPreferredParentWasRxOn    = false;
++}
++
++void Mle::Attacher::FinishPreferredParent(otThreadPreferredParentState  aState,
++                                           otThreadPreferredParentResult aResult,
++                                           Error                         aError,
++                                           otThreadPreferredParentEvent  aEvent)
++{
++    mTimer.Stop();
++    SetState(kStateIdle);
++    RestorePreferredParentRxState();
++    mParentCandidate.Clear();
++    mPreferredParentCandidate.Clear();
++    mPreferredParentCandidateValid = false;
++    mPreferredParentStatus.mState  = aState;
++    mPreferredParentStatus.mResult = aResult;
++    mPreferredParentStatus.mError  = aError;
++    EmitPreferredParentEvent(aEvent);
++}
++
++void Mle::Attacher::BeginPreferredParentAttempt(void)
++{
++    mPreferredParentStatus.mAttempt++;
++    mPreferredParentStatus.mState = OT_THREAD_PREFERRED_PARENT_STATE_STARTING_DISCOVERY;
++    mPreferredParentCandidate.Clear();
++    mPreferredParentCandidateValid = false;
++    mParentCandidate.Clear();
++    mPreferredParentWasRxOn    = Get<Mle>().IsRxOnWhenIdle();
++    mPreferredParentForcedRxOn = !mPreferredParentWasRxOn;
++    Attach(kBetterParent);
++    mPreferredParentStatus.mState = OT_THREAD_PREFERRED_PARENT_STATE_WAITING_PARENT_REQUEST;
+ }
+ 
++Error Mle::Attacher::StartPreferredParent(const otThreadPreferredParentConfig &aConfig)
++{
++    Error error = kErrorNone;
++    bool  allZero = true;
++    bool  allOnes = true;
++
++    VerifyOrExit(Get<Mle>().IsChild(), error = kErrorInvalidState);
++    VerifyOrExit(!IsPreferredParentActive() && !IsAttaching(), error = kErrorBusy);
++    VerifyOrExit((aConfig.mMode == OT_THREAD_PREFERRED_PARENT_MODE_MULTICAST) ||
++                     (aConfig.mMode == OT_THREAD_PREFERRED_PARENT_MODE_UNICAST),
++                 error = kErrorInvalidArgs);
++    VerifyOrExit((aConfig.mMaxAttempts != 0) && (aConfig.mRetryInterval != 0) && (aConfig.mAttachTimeout != 0),
++                 error = kErrorInvalidArgs);
++
++    for (uint8_t byte : aConfig.mExtAddress.m8)
++    {
++        allZero = allZero && (byte == 0);
++        allOnes = allOnes && (byte == 0xff);
++    }
++    VerifyOrExit(!allZero && !allOnes, error = kErrorInvalidArgs);
++
++    mPreferredParentConfig = aConfig;
++    mPreferredParentStatus.mState       = OT_THREAD_PREFERRED_PARENT_STATE_STARTING_DISCOVERY;
++    mPreferredParentStatus.mResult      = OT_THREAD_PREFERRED_PARENT_RESULT_NONE;
++    mPreferredParentStatus.mMode        = aConfig.mMode;
++    mPreferredParentStatus.mExtAddress  = aConfig.mExtAddress;
++    mPreferredParentStatus.mGeneration++;
++    mPreferredParentStatus.mAttempt     = 0;
++    mPreferredParentStatus.mMaxAttempts = aConfig.mMaxAttempts;
++    mPreferredParentStatus.mError       = kErrorNone;
++    EmitPreferredParentEvent(OT_THREAD_PREFERRED_PARENT_EVENT_REQUESTED);
++    BeginPreferredParentAttempt();
++
++exit:
++    return error;
++}
++
++Error Mle::Attacher::CancelPreferredParent(void)
++{
++    Error error = kErrorNone;
++
++    VerifyOrExit(IsPreferredParentActive(), error = kErrorInvalidState);
++    FinishPreferredParent(OT_THREAD_PREFERRED_PARENT_STATE_CANCELLED,
++                          OT_THREAD_PREFERRED_PARENT_RESULT_CANCELLED, kErrorAbort,
++                          OT_THREAD_PREFERRED_PARENT_EVENT_CANCELLED);
++
++exit:
++    return error;
++}
++
++Error Mle::Attacher::ClearPreferredParent(void)
++{
++    Error error = kErrorNone;
++    uint32_t generation;
++
++    VerifyOrExit(!IsPreferredParentActive(), error = kErrorBusy);
++    generation = mPreferredParentStatus.mGeneration;
++    ClearAllBytes(mPreferredParentConfig);
++    mPreferredParentCandidate.Clear();
++    mPreferredParentCandidateValid = false;
++    ClearAllBytes(mPreferredParentStatus);
++    mPreferredParentStatus.mState  = OT_THREAD_PREFERRED_PARENT_STATE_IDLE;
++    mPreferredParentStatus.mResult = OT_THREAD_PREFERRED_PARENT_RESULT_NONE;
++    mPreferredParentStatus.mError  = kErrorNone;
++    mPreferredParentStatus.mGeneration = generation;
++    EmitPreferredParentEvent(OT_THREAD_PREFERRED_PARENT_EVENT_CLEARED);
++
++exit:
++    return error;
++}
++
++void Mle::Attacher::RetryOrTimeoutPreferredParent(otThreadPreferredParentResult aResult)
++{
++    SetState(kStateIdle);
++    mTimer.Stop();
++    RestorePreferredParentRxState();
++    mParentCandidate.Clear();
++    mPreferredParentCandidate.Clear();
++    mPreferredParentCandidateValid = false;
++
++    if (mPreferredParentStatus.mAttempt < mPreferredParentStatus.mMaxAttempts)
++    {
++        BeginPreferredParentAttempt();
++    }
++    else
++    {
++        FinishPreferredParent(OT_THREAD_PREFERRED_PARENT_STATE_TIMED_OUT, aResult, kErrorResponseTimeout,
++                              OT_THREAD_PREFERRED_PARENT_EVENT_TIMED_OUT);
++    }
++}
++#endif
++
+ void Mle::Attacher::Start(StartMode aMode)
+ {
+     mAttachCounter = 0;
+@@ -4558,6 +4763,14 @@ exit:
+ 
+ void Mle::Attacher::CancelAttachOnRoleChange(void)
+ {
++#if OPENTHREAD_CONFIG_EXPERIMENTAL_PREFERRED_PARENT_ENABLE
++    if (IsPreferredParentActive() && !mPreferredParentCompletingChildIdResponse)
++    {
++        FinishPreferredParent(OT_THREAD_PREFERRED_PARENT_STATE_FAILED,
++                              OT_THREAD_PREFERRED_PARENT_RESULT_ROLE_CHANGED, kErrorInvalidState,
++                              OT_THREAD_PREFERRED_PARENT_EVENT_FAILED);
++    }
++#endif
+     SetState(kStateIdle);
+     mTimer.Stop();
+ 
+@@ -4609,6 +4822,13 @@ void Mle::Attacher::Attach(AttachMode aMode)
+     }
+ 
+     mParentCandidate.Clear();
++#if OPENTHREAD_CONFIG_EXPERIMENTAL_PREFERRED_PARENT_ENABLE
++    if (!IsPreferredParentActive())
++    {
++        mPreferredParentCandidate.Clear();
++        mPreferredParentCandidateValid = false;
++    }
++#endif
+     SetState(kStateStart);
+     mMode = aMode;
+ 
+@@ -4821,6 +5041,22 @@ void Mle::Attacher::HandleTimer(void)
+     bool              shouldAnnounce = true;
+     ParentRequestType type;
+ 
++#if OPENTHREAD_CONFIG_EXPERIMENTAL_PREFERRED_PARENT_ENABLE
++    if ((mPreferredParentStatus.mState == OT_THREAD_PREFERRED_PARENT_STATE_WAITING_TARGET_RESPONSE) &&
++        (mState == kStateParentRequest))
++    {
++        RetryOrTimeoutPreferredParent(OT_THREAD_PREFERRED_PARENT_RESULT_TARGET_TIMEOUT);
++        ExitNow();
++    }
++
++    if ((mPreferredParentStatus.mState == OT_THREAD_PREFERRED_PARENT_STATE_WAITING_CHILD_ID_RESPONSE) &&
++        (mState == kStateChildIdRequest))
++    {
++        RetryOrTimeoutPreferredParent(OT_THREAD_PREFERRED_PARENT_RESULT_ATTACH_TIMEOUT);
++        ExitNow();
++    }
++#endif
++
+     // First, check if we are waiting to receive parent responses and
+     // found an acceptable parent candidate.
+ 
+@@ -4857,6 +5093,14 @@ void Mle::Attacher::HandleTimer(void)
+         {
+             SendParentRequest(type);
+ 
++#if OPENTHREAD_CONFIG_EXPERIMENTAL_PREFERRED_PARENT_ENABLE
++            if (IsPreferredParentActive())
++            {
++                delay = mPreferredParentConfig.mRetryInterval;
++                break;
++            }
++#endif
++
+             switch (type)
+             {
+             case kToRouters:
+@@ -5061,6 +5305,17 @@ void Mle::Attacher::SendParentRequest(ParentRequestType aType)
+     SuccessOrExit(error = message->AppendTimeRequestTlv());
+ #endif
+ 
++#if OPENTHREAD_CONFIG_EXPERIMENTAL_PREFERRED_PARENT_ENABLE
++    if (IsPreferredParentActive() &&
++        (mPreferredParentConfig.mMode == OT_THREAD_PREFERRED_PARENT_MODE_UNICAST))
++    {
++        Mac::ExtAddress target;
++
++        target.Set(mPreferredParentConfig.mExtAddress.m8);
++        destination.InitAsLinkLocalAddress(target);
++    }
++    else
++#endif
+ #if OPENTHREAD_FTD && OPENTHREAD_CONFIG_PARENT_SEARCH_ENABLE
+     if (aType == kToSelectedRouter)
+     {
+@@ -5090,6 +5345,14 @@ void Mle::Attacher::SendParentRequest(ParentRequestType aType)
+ 
+     SuccessOrExit(error = message->SendTo(destination));
+ 
++#if OPENTHREAD_CONFIG_EXPERIMENTAL_PREFERRED_PARENT_ENABLE
++    if (IsPreferredParentActive())
++    {
++        mPreferredParentStatus.mState = OT_THREAD_PREFERRED_PARENT_STATE_WAITING_TARGET_RESPONSE;
++        EmitPreferredParentEvent(OT_THREAD_PREFERRED_PARENT_EVENT_PARENT_REQUEST_STARTED);
++    }
++#endif
++
+     switch (aType)
+     {
+     case kToRouters:
+@@ -5339,6 +5602,17 @@ void Mle::Attacher::HandleParentResponse(RxInfo &aRxInfo)
+     cslAccuracy.Init();
+ #endif
+ 
++#if OPENTHREAD_CONFIG_EXPERIMENTAL_PREFERRED_PARENT_ENABLE
++    if ((mPreferredParentStatus.mState == OT_THREAD_PREFERRED_PARENT_STATE_WAITING_TARGET_RESPONSE) ||
++        (mPreferredParentStatus.mState == OT_THREAD_PREFERRED_PARENT_STATE_CONTINUING_SELECTED_ATTACH))
++    {
++        Mac::ExtAddress target;
++
++        target.Set(mPreferredParentConfig.mExtAddress.m8);
++        VerifyOrExit(extAddress == target, error = kErrorDrop);
++    }
++#endif
++
+ #if OPENTHREAD_CONFIG_MLE_PARENT_RESPONSE_CALLBACK_API_ENABLE
+     if (mParentResponseCallback.IsSet())
+     {
+@@ -5480,6 +5754,35 @@ void Mle::Attacher::HandleParentResponse(RxInfo &aRxInfo)
+     }
+ #endif
+ 
++#if OPENTHREAD_CONFIG_EXPERIMENTAL_PREFERRED_PARENT_ENABLE
++    if (mPreferredParentStatus.mState == OT_THREAD_PREFERRED_PARENT_STATE_WAITING_TARGET_RESPONSE)
++    {
++        mPreferredParentCandidate      = mParentCandidate;
++        mPreferredParentCandidateValid = true;
++        mPreferredParentStatus.mState  = OT_THREAD_PREFERRED_PARENT_STATE_CONTINUING_SELECTED_ATTACH;
++        EmitPreferredParentEvent(OT_THREAD_PREFERRED_PARENT_EVENT_TARGET_RESPONSE, sourceAddress, rss);
++
++        VerifyOrExit(mPreferredParentCandidateValid, error = kErrorInvalidState);
++        mParentCandidate = mPreferredParentCandidate;
++        mMode            = kSelectedParent;
++        SetState(kStateIdle);
++        SetState(kStateChildIdRequest);
++
++        error = SendChildIdRequest();
++        if (error != kErrorNone)
++        {
++            FinishPreferredParent(OT_THREAD_PREFERRED_PARENT_STATE_FAILED,
++                                  OT_THREAD_PREFERRED_PARENT_RESULT_START_FAILED, error,
++                                  OT_THREAD_PREFERRED_PARENT_EVENT_FAILED);
++            ExitNow();
++        }
++
++        mPreferredParentStatus.mState = OT_THREAD_PREFERRED_PARENT_STATE_WAITING_CHILD_ID_RESPONSE;
++        mTimer.Start(mPreferredParentConfig.mAttachTimeout);
++        EmitPreferredParentEvent(OT_THREAD_PREFERRED_PARENT_EVENT_CHILD_ID_REQUEST_STARTED, sourceAddress, rss);
++    }
++#endif
++
+ exit:
+     LogProcessError(kTypeParentResponse, error);
+ }
+@@ -5551,6 +5854,11 @@ void Mle::Attacher::HandleChildIdResponse(RxInfo &aRxInfo)
+ 
+     // Parent Attach Success
+ 
++#if OPENTHREAD_CONFIG_EXPERIMENTAL_PREFERRED_PARENT_ENABLE
++    mPreferredParentCompletingChildIdResponse =
++        (mPreferredParentStatus.mState == OT_THREAD_PREFERRED_PARENT_STATE_WAITING_CHILD_ID_RESPONSE);
++#endif
++
+     Get<Mle>().SetStateDetached();
+ 
+     Get<Mle>().SetLeaderData(leaderData);
+@@ -5583,6 +5891,22 @@ void Mle::Attacher::HandleChildIdResponse(RxInfo &aRxInfo)
+     Get<Mle>().mFastAttachEnabled = false;
+ #endif
+ 
++#if OPENTHREAD_CONFIG_EXPERIMENTAL_PREFERRED_PARENT_ENABLE
++    mPreferredParentCompletingChildIdResponse = false;
++    if (mPreferredParentStatus.mState == OT_THREAD_PREFERRED_PARENT_STATE_WAITING_CHILD_ID_RESPONSE)
++    {
++        Mac::ExtAddress target;
++
++        target.Set(mPreferredParentConfig.mExtAddress.m8);
++        if (Get<Mle>().mParent.GetExtAddress() == target)
++        {
++            FinishPreferredParent(OT_THREAD_PREFERRED_PARENT_STATE_SUCCEEDED,
++                                  OT_THREAD_PREFERRED_PARENT_RESULT_SUCCESS, kErrorNone,
++                                  OT_THREAD_PREFERRED_PARENT_EVENT_SUCCEEDED);
++        }
++    }
++#endif
++
+     if (!Get<Mle>().IsRxOnWhenIdle())
+     {
+         Get<DataPollSender>().SetAttachMode(false);
+@@ -5596,6 +5920,9 @@ void Mle::Attacher::HandleChildIdResponse(RxInfo &aRxInfo)
+     aRxInfo.mClass = RxInfo::kPeerMessage;
+ 
+ exit:
++#if OPENTHREAD_CONFIG_EXPERIMENTAL_PREFERRED_PARENT_ENABLE
++    mPreferredParentCompletingChildIdResponse = false;
++#endif
+     LogProcessError(kTypeChildIdResponse, error);
+ }
+ 
+diff --git a/src/core/thread/mle.hpp b/src/core/thread/mle.hpp
+index eccd2557a..c92fc166f 100644
+--- a/src/core/thread/mle.hpp
++++ b/src/core/thread/mle.hpp
+@@ -38,6 +38,9 @@
+ 
+ #include <openthread/thread_ftd.h>
+ #include <openthread/provisional/p2p.h>
++#if OPENTHREAD_CONFIG_EXPERIMENTAL_PREFERRED_PARENT_ENABLE
++#include <openthread/preferred_parent.h>
++#endif
+ 
+ #include "coap/coap_message.hpp"
+ #include "common/as_core_type.hpp"
+@@ -476,6 +479,14 @@ public:
+      */
+     Error SearchForBetterParent(void);
+ 
++#if OPENTHREAD_CONFIG_EXPERIMENTAL_PREFERRED_PARENT_ENABLE
++    Error StartPreferredParent(const otThreadPreferredParentConfig &aConfig);
++    Error CancelPreferredParent(void);
++    Error ClearPreferredParent(void);
++    void  GetPreferredParentStatus(otThreadPreferredParentStatus &aStatus) const;
++    void  SetPreferredParentCallback(otThreadPreferredParentCallback aCallback, void *aContext);
++#endif
++
+     /**
+      * Indicates whether or not an IPv6 address is an RLOC.
+      *
+@@ -2021,6 +2032,14 @@ private:
+         void             HandleChildIdResponse(RxInfo &aRxInfo);
+         void             HandleTimer(void);
+ 
++#if OPENTHREAD_CONFIG_EXPERIMENTAL_PREFERRED_PARENT_ENABLE
++        Error StartPreferredParent(const otThreadPreferredParentConfig &aConfig);
++        Error CancelPreferredParent(void);
++        Error ClearPreferredParent(void);
++        void  GetPreferredParentStatus(otThreadPreferredParentStatus &aStatus) const;
++        void  SetPreferredParentCallback(otThreadPreferredParentCallback aCallback, void *aContext);
++#endif
++
+ #if OPENTHREAD_CONFIG_MLE_PARENT_RESPONSE_CALLBACK_API_ENABLE
+         Callback<otThreadParentResponseCallback> mParentResponseCallback;
+ #endif
+@@ -2064,6 +2083,19 @@ private:
+         static void HandleChildIdRequestTxDone(const otMessage *aMessage, otError aError, void *aContext);
+ 
+         static const char *StateToString(State aState);
++#if OPENTHREAD_CONFIG_EXPERIMENTAL_PREFERRED_PARENT_ENABLE
++        bool IsPreferredParentActive(void) const;
++        void BeginPreferredParentAttempt(void);
++        void FinishPreferredParent(otThreadPreferredParentState  aState,
++                                   otThreadPreferredParentResult aResult,
++                                   Error                         aError,
++                                   otThreadPreferredParentEvent  aEvent);
++        void EmitPreferredParentEvent(otThreadPreferredParentEvent aEvent,
++                                      uint16_t                     aRloc16 = kInvalidRloc16,
++                                      int8_t                       aRssi   = Radio::kInvalidRssi);
++        void RestorePreferredParentRxState(void);
++        void RetryOrTimeoutPreferredParent(otThreadPreferredParentResult aResult);
++#endif
+ #if OT_SHOULD_LOG_AT(OT_LOG_LEVEL_NOTE)
+         static const char *AttachModeToString(AttachMode aMode);
+         static const char *ReattachModeToString(ReattachMode aMode);
+@@ -2082,6 +2114,17 @@ private:
+         uint16_t                mAnnounceDelay;
+         TxChallenge             mParentRequestChallenge;
+         ParentCandidate         mParentCandidate;
++#if OPENTHREAD_CONFIG_EXPERIMENTAL_PREFERRED_PARENT_ENABLE
++        ParentCandidate                  mPreferredParentCandidate;
++        otThreadPreferredParentConfig     mPreferredParentConfig;
++        otThreadPreferredParentStatus     mPreferredParentStatus;
++        otThreadPreferredParentCallback   mPreferredParentCallback;
++        void                             *mPreferredParentCallbackContext;
++        bool                              mPreferredParentCandidateValid : 1;
++        bool                              mPreferredParentForcedRxOn : 1;
++        bool                              mPreferredParentWasRxOn : 1;
++        bool                              mPreferredParentCompletingChildIdResponse : 1;
++#endif
+         AttachTimer             mTimer;
+     };
+ 

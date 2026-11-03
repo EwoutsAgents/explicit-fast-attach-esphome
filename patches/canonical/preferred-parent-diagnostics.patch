@@ -1,0 +1,107 @@
+--- a/src/core/thread/mle.cpp
++++ b/src/core/thread/mle.cpp
+@@ -4969,7 +4969,13 @@
+ 
+     if (HasAcceptableParentCandidate() && (SendChildIdRequest() == kErrorNone))
+     {
+-        SetState(kStateChildIdRequest);
++        
++            if (mMode == kSelectedParent)
++            {
++                LogNote("SelectedParent ChildIdRequest sent cand=0x%04x timeout=%lu",
++                        mParentCandidate.GetRloc16(), ToUlong(kChildIdResponseTimeout));
++            }
++            SetState(kStateChildIdRequest);
+         delay = kChildIdResponseTimeout;
+         ExitNow();
+     }
+@@ -5044,6 +5050,10 @@
+         OT_FALL_THROUGH;
+ 
+     case kStateChildIdRequest:
++        if (mMode == kSelectedParent)
++        {
++            LogWarn("SelectedParent ChildIdRequest timed out cand=0x%04x", mParentCandidate.GetRloc16());
++        }
+         SetState(kStateIdle);
+         mParentCandidate.Clear();
+         delay = Reattach();
+@@ -5335,6 +5345,11 @@
+         (mAddressRegistrationMode == kAppendMeshLocalOnly) ? kTypeChildIdRequestShort : kTypeChildIdRequest,
+         destination);
+ exit:
++    if ((error != kErrorNone) && (mMode == kSelectedParent))
++    {
++        LogWarn("SelectedParent ChildIdRequest send failed err=%s cand=0x%04x",
++                ErrorToString(error), mParentCandidate.GetRloc16());
++    }
+     FreeMessageOnError(message, error);
+     return error;
+ }
+@@ -5449,7 +5464,16 @@
+ 
+     SuccessOrExit(error = aRxInfo.mMessage.ReadVersionTlv(version));
+ 
+-    SuccessOrExit(error = aRxInfo.mMessage.ReadAndMatchResponseTlvWith(mParentRequestChallenge));
++    error = aRxInfo.mMessage.ReadAndMatchResponseTlvWith(mParentRequestChallenge);
++    if (error != kErrorNone)
++    {
++        if (mMode == kSelectedParent)
++        {
++            LogWarn("SelectedParent ParentResponse challenge mismatch err=%s keyseq=%lu frame=%lu",
++                    ErrorToString(error), ToUlong(aRxInfo.mKeySequence), ToUlong(aRxInfo.mFrameCounter));
++        }
++        ExitNow();
++    }
+ 
+     extAddress.SetFromIid(aRxInfo.mMessageInfo.GetPeerAddr().GetIid());
+ 
+@@ -5661,6 +5685,11 @@
+     mParentCandidate.mLinkMargin       = twoWayLinkMargin;
+ 
+ exit:
++    if ((error != kErrorNone) && (mMode == kSelectedParent))
++    {
++        LogWarn("SelectedParent ParentResponse reject err=%s src=0x%04x rss=%d cand=0x%04x",
++                ErrorToString(error), sourceAddress, rss, mParentCandidate.GetRloc16());
++    }
+     LogProcessError(kTypeParentResponse, error);
+ }
+ 
+@@ -5676,6 +5705,12 @@
+ 
+     Log(kMessageReceive, kTypeChildIdResponse, aRxInfo.mMessageInfo.GetPeerAddr(), sourceAddress);
+ 
++    if ((mMode == kSelectedParent) && !aRxInfo.IsNeighborStateValid())
++    {
++        LogWarn("SelectedParent ChildIdResponse neighbor invalid src=0x%04x keyseq=%lu frame=%lu",
++                sourceAddress, ToUlong(aRxInfo.mKeySequence), ToUlong(aRxInfo.mFrameCounter));
++        ExitNow(error = kErrorSecurity);
++    }
+     VerifyOrExit(aRxInfo.IsNeighborStateValid(), error = kErrorSecurity);
+ 
+     VerifyOrExit(mState == kStateChildIdRequest);
+@@ -5751,6 +5786,11 @@
+     IgnoreError(aRxInfo.mMessage.ReadAndSetNetworkDataTlv(leaderData));
+ 
+     Get<Mle>().SetStateChild(shortAddress);
++    LogNote("Current parent ExtAddr: %s", Get<Mle>().mParent.GetExtAddress().ToString().AsCString());
++    if (mMode == kSelectedParent)
++    {
++        LogNote("SelectedParent ChildIdResponse accepted parent=0x%04x child=0x%04x", sourceAddress, shortAddress);
++    }
+ 
+     if (!Get<Mle>().IsRxOnWhenIdle())
+     {
+@@ -5765,6 +5805,11 @@
+     aRxInfo.mClass = RxInfo::kPeerMessage;
+ 
+ exit:
++    if ((error != kErrorNone) && (mMode == kSelectedParent))
++    {
++        LogWarn("SelectedParent ChildIdResponse reject err=%s src=0x%04x short=0x%04x",
++                ErrorToString(error), sourceAddress, shortAddress);
++    }
+     LogProcessError(kTypeChildIdResponse, error);
+ }
+ 

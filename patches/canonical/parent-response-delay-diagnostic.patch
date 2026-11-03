@@ -1,0 +1,14 @@
+diff --git a/src/core/thread/mle_ftd.cpp b/src/core/thread/mle_ftd.cpp
+index d01925063..23b5075e8 100644
+--- a/src/core/thread/mle_ftd.cpp
++++ b/src/core/thread/mle_ftd.cpp
+@@ -1603,6 +1603,9 @@ void Mle::HandleParentRequest(RxInfo &aRxInfo)
+ 
+     delay = GenerateRandomDelay(!ScanMaskTlv::IsEndDeviceFlagSet(scanMask) ? kParentResponseMaxDelayRouters
+                                                                            : kParentResponseMaxDelayAll);
++    // PARENT_RESPONSE_DELAY_DIAGNOSTIC
++    LogNote("ParentResponseDelay delay_ms=%lu scan_mask=0x%02x child=%s", ToUlong(delay), scanMask,
++            info.mChildExtAddress.ToString().AsCString());
+     mDelayedSender.ScheduleParentResponse(info, delay);
+ 
+ exit:

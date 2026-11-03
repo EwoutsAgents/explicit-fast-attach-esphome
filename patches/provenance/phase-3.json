@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "experiment_date": "2026-07-13",
+  "verdict": "VALIDATED",
+  "selected_track": "A",
+  "selected_openthread": {
+    "commit": "a12ff0d0f54fd41954b45047fcdd08f302731c5f",
+    "role": "hardware ESP-IDF 5.5.4 OpenThread revision"
+  },
+  "fallback_track": {
+    "name": "B",
+    "openthread_commit": "7874555efb1772bad66049ab06a78a2ce0c925f3",
+    "commits_after_selected_base": 830
+  },
+  "simulation": {
+    "otns_commit": "099a6c26cb1d2b8749d3171d5cdd8597fc71049c",
+    "otns_maps_commit": "45ab9cf71891ff323cfce80f9b8c6546ef3b97af",
+    "scenario": "scenarios/static/med_static_parent_removal_2routers.yaml"
+  },
+  "build": {
+    "status": "passed",
+    "source_compatibility_patches": [],
+    "ninja_steps": 754,
+    "parent_search_enabled": false,
+    "toolchain": {
+      "os": "Linux 6.17.0-29-generic x86_64",
+      "gcc": "13.3.0",
+      "cmake": "3.28.3",
+      "ninja": "1.13.1"
+    },
+    "binaries": {
+      "ot-cli-mtd": {
+        "size_bytes": 33448320,
+        "sha256": "d13e4d1a2e7699b0448a5902c577fe26276552fb2c49ba5e88bce6dc7d4fc823"
+      },
+      "ot-cli-ftd": {
+        "size_bytes": 46965216,
+        "sha256": "a5c2b9c9e937252f8774d879589d53fd459cd04e9561fcdcf5502700d5a939b5"
+      }
+    }
+  },
+  "runtime": {
+    "runs": 2,
+    "explicit_stress_seed": 2303,
+    "required_gate_passed_in_all_runs": true,
+    "representative_result": {
+      "result_classification": "switch_observed",
+      "parent_before_removal": "router_a",
+      "removed_parent": "router_a",
+      "parent_after_removal": "router_b",
+      "parent_removal_time_s": 305.0,
+      "reattach_time_s": 542.0,
+      "post_removal_reattach_latency_s": 237.0,
+      "final_mobile_state": "child",
+      "ended_detached": false,
+      "packet_delivery_ratio": 1.0,
+      "mle_attach_attempts": 2
+    }
+  },
+  "variant_isolation": {
+    "source_model": "separate clean Git worktrees at the selected commit",
+    "build_model": "separate CMake output directory per variant",
+    "shared_git_object_store_allowed": true,
+    "mixed_binaries_supported": true
+  }
+}

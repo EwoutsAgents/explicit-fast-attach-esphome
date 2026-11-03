@@ -1,0 +1,261 @@
+This is a starter patch for the OpenThread copy used by ESP-IDF. It is written
+as an implementation guide rather than a guaranteed `git apply` patch because
+ESP-IDF vendors specific OpenThread revisions.
+
+Target idea:
+  * Add public C APIs:
+      otThreadSearchForPreferredParentRloc16(instance, rloc16)
+      otThreadSearchForPreferredParentExtAddress(instance, extaddr)
+      otThreadSetPreferredParentRloc16(instance, rloc16)
+      otThreadSetPreferredParentExtAddress(instance, extaddr)
+      otThreadClearPreferredParent(instance)
+  * Add an MLE attach mode that accepts only Parent Responses whose candidate
+    parent identifier matches the requested RLOC16 or IEEE 802.15.4 Extended
+    Address.
+  * When this preferred mode is active, bypass the normal "better parent"
+    comparison. This is intentional: the user is explicitly forcing the parent.
+
+--- include/openthread/thread.h
++++ include/openthread/thread.h
+@@
+ otError otThreadSearchForBetterParent(otInstance *aInstance);
++
++/**
++ * Starts a parent search that only accepts a Parent Response from `aParentRloc16`.
++ *
++ * This is a non-standard extension intended for controlled diagnostics and
++ * experiments, not general Thread behavior.
++ */
++otError otThreadSearchForPreferredParentRloc16(otInstance *aInstance, uint16_t aParentRloc16);
++
++/**
++ * Starts a parent search that only accepts a Parent Response from `aParentExtAddress`.
++ *
++ * This is a non-standard extension intended for controlled diagnostics and
++ * experiments, not general Thread behavior.
++ */
++otError otThreadSearchForPreferredParentExtAddress(otInstance *aInstance, const otExtAddress *aParentExtAddress);
++
++/** Sets the preferred parent RLOC16 used by the preferred-parent attach mode. */
++otError otThreadSetPreferredParentRloc16(otInstance *aInstance, uint16_t aParentRloc16);
++
++/** Sets the preferred parent extended address used by the preferred-parent attach mode. */
++otError otThreadSetPreferredParentExtAddress(otInstance *aInstance, const otExtAddress *aParentExtAddress);
++
++/** Clears any preferred parent target. */
++void otThreadClearPreferredParent(otInstance *aInstance);
+ 
+--- src/core/api/thread_api.cpp
++++ src/core/api/thread_api.cpp
+@@
+ otError otThreadSearchForBetterParent(otInstance *aInstance)
+ {
+     return AsCoreType(aInstance).Get<Mle::Mle>().SearchForBetterParent();
+ }
++
++otError otThreadSearchForPreferredParentRloc16(otInstance *aInstance, uint16_t aParentRloc16)
++{
++    return AsCoreType(aInstance).Get<Mle::Mle>().SearchForPreferredParentRloc16(aParentRloc16);
++}
++
++otError otThreadSearchForPreferredParentExtAddress(otInstance *aInstance, const otExtAddress *aParentExtAddress)
++{
++    return AsCoreType(aInstance).Get<Mle::Mle>().SearchForPreferredParentExtAddress(*aParentExtAddress);
++}
++
++otError otThreadSetPreferredParentRloc16(otInstance *aInstance, uint16_t aParentRloc16)
++{
++    return AsCoreType(aInstance).Get<Mle::Mle>().SetPreferredParentRloc16(aParentRloc16);
++}
++
++otError otThreadSetPreferredParentExtAddress(otInstance *aInstance, const otExtAddress *aParentExtAddress)
++{
++    return AsCoreType(aInstance).Get<Mle::Mle>().SetPreferredParentExtAddress(*aParentExtAddress);
++}
++
++void otThreadClearPreferredParent(otInstance *aInstance)
++{
++    AsCoreType(aInstance).Get<Mle::Mle>().ClearPreferredParent();
++}
+ 
+--- src/core/thread/mle.hpp
++++ src/core/thread/mle.hpp
+@@
+ enum AttachMode : uint8_t
+ {
+     kAnyPartition,
+     kSamePartition,
+     kBetterPartition,
+     kDowngradeToReed,
+     kBetterParent,
+     kSelectedParent,
++    kPreferredParent,
+ };
++
++enum PreferredParentIdentifierType : uint8_t
++{
++    kPreferredParentNone,
++    kPreferredParentRloc16,
++    kPreferredParentExtAddress,
++};
+@@
+     Error SearchForBetterParent(void);
++    Error SearchForPreferredParentRloc16(uint16_t aParentRloc16);
++    Error SearchForPreferredParentExtAddress(const otExtAddress &aParentExtAddress);
++    Error SetPreferredParentRloc16(uint16_t aParentRloc16);
++    Error SetPreferredParentExtAddress(const otExtAddress &aParentExtAddress);
++    void ClearPreferredParent(void);
+@@
+     void Attach(AttachMode aMode);
++    Error AttachToPreferredParentRloc16(uint16_t aParentRloc16);
++    Error AttachToPreferredParentExtAddress(const otExtAddress &aParentExtAddress);
++    Error SetPreferredParentRloc16(uint16_t aParentRloc16);
++    Error SetPreferredParentExtAddress(const otExtAddress &aParentExtAddress);
++    void ClearPreferredParent(void);
+@@
+     uint16_t mAnnounceDelay;
++    PreferredParentIdentifierType mPreferredParentIdentifierType;
++    uint16_t mPreferredParentRloc16;
++    otExtAddress mPreferredParentExtAddress;
++    bool mPreferredParentSelectionActive;
+     TxChallenge mParentRequestChallenge;
+ 
+--- src/core/thread/mle.cpp
++++ src/core/thread/mle.cpp
+@@
+ Error Mle::SearchForBetterParent(void)
+ {
+     Error error = kErrorNone;
+     VerifyOrExit(IsChild(), error = kErrorInvalidState);
+     mAttacher.Attach(kBetterParent);
+ exit:
+     return error;
+ }
++
++Error Mle::SearchForPreferredParentRloc16(uint16_t aParentRloc16)
++{
++    Error error = kErrorNone;
++    VerifyOrExit(IsChild(), error = kErrorInvalidState);
++    SuccessOrExit(error = mAttacher.AttachToPreferredParentRloc16(aParentRloc16));
++exit:
++    return error;
++}
++
++Error Mle::SearchForPreferredParentExtAddress(const otExtAddress &aParentExtAddress)
++{
++    Error error = kErrorNone;
++    VerifyOrExit(IsChild(), error = kErrorInvalidState);
++    SuccessOrExit(error = mAttacher.AttachToPreferredParentExtAddress(aParentExtAddress));
++exit:
++    return error;
++}
++
++Error Mle::SetPreferredParentRloc16(uint16_t aParentRloc16)
++{
++    return mAttacher.SetPreferredParentRloc16(aParentRloc16);
++}
++
++Error Mle::SetPreferredParentExtAddress(const otExtAddress &aParentExtAddress)
++{
++    return mAttacher.SetPreferredParentExtAddress(aParentExtAddress);
++}
++
++void Mle::ClearPreferredParent(void)
++{
++    mAttacher.ClearPreferredParent();
++}
+@@
+ Mle::Attacher::Attacher(Instance &aInstance)
+     : InstanceLocator(aInstance)
++    , mPreferredParentIdentifierType(kPreferredParentNone)
++    , mPreferredParentRloc16(kInvalidRloc16)
++    , mPreferredParentSelectionActive(false)
+ {
++    memset(&mPreferredParentExtAddress, 0, sizeof(mPreferredParentExtAddress));
+ }
++
++Error Mle::Attacher::SetPreferredParentRloc16(uint16_t aParentRloc16)
++{
++    Error error = kErrorNone;
++    VerifyOrExit(aParentRloc16 != kInvalidRloc16, error = kErrorInvalidArgs);
++    mPreferredParentIdentifierType = kPreferredParentRloc16;
++    mPreferredParentRloc16 = aParentRloc16;
++    mPreferredParentSelectionActive = true;
++exit:
++    return error;
++}
++
++Error Mle::Attacher::SetPreferredParentExtAddress(const otExtAddress &aParentExtAddress)
++{
++    mPreferredParentIdentifierType = kPreferredParentExtAddress;
++    mPreferredParentExtAddress = aParentExtAddress;
++    mPreferredParentSelectionActive = true;
++    return kErrorNone;
++}
++
++void Mle::Attacher::ClearPreferredParent(void)
++{
++    mPreferredParentIdentifierType = kPreferredParentNone;
++    mPreferredParentRloc16 = kInvalidRloc16;
++    memset(&mPreferredParentExtAddress, 0, sizeof(mPreferredParentExtAddress));
++    mPreferredParentSelectionActive = false;
++}
++
++Error Mle::Attacher::AttachToPreferredParentRloc16(uint16_t aParentRloc16)
++{
++    Error error = kErrorNone;
++    VerifyOrExit(!IsAttaching(), error = kErrorBusy);
++    SuccessOrExit(error = SetPreferredParentRloc16(aParentRloc16));
++    Attach(kPreferredParent);
++exit:
++    return error;
++}
++
++Error Mle::Attacher::AttachToPreferredParentExtAddress(const otExtAddress &aParentExtAddress)
++{
++    Error error = kErrorNone;
++    VerifyOrExit(!IsAttaching(), error = kErrorBusy);
++    SuccessOrExit(error = SetPreferredParentExtAddress(aParentExtAddress));
++    Attach(kPreferredParent);
++exit:
++    return error;
++}
+@@
+-        case kBetterParent:
++        case kBetterParent:
+         case kSelectedParent:
+             VerifyOrExit(mReceivedResponseFromParent);
+             break;
++        case kPreferredParent:
++            // Explicit user override: do not require current parent comparison.
++            break;
+@@
+-    if (mParentCandidate.IsStateParentResponse() && (mParentCandidate.GetExtAddress() != extAddress))
++    if (mPreferredParentSelectionActive)
++    {
++        switch (mPreferredParentIdentifierType)
++        {
++        case kPreferredParentRloc16:
++            VerifyOrExit(sourceAddress == mPreferredParentRloc16);
++            break;
++
++        case kPreferredParentExtAddress:
++            VerifyOrExit(extAddress == mPreferredParentExtAddress);
++            break;
++
++        case kPreferredParentNone:
++            ExitNow();
++        }
++    }
++
++    if (mParentCandidate.IsStateParentResponse() && (mParentCandidate.GetExtAddress() != extAddress))
+     {
++        if (mPreferredParentSelectionActive)
++        {
++            // We already filtered for the requested identifier; keep the first
++            // matching response instead of comparing against unrelated parents.
++            ExitNow();
++        }
+         int compare = 0;
+         ... existing comparison logic ...
+     }

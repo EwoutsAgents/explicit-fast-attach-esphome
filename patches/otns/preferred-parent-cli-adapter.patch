@@ -1,0 +1,253 @@
+diff --git a/examples/apps/cli/ftd.cmake b/examples/apps/cli/ftd.cmake
+index 30d07462b..838d35a77 100644
+--- a/examples/apps/cli/ftd.cmake
++++ b/examples/apps/cli/ftd.cmake
+@@ -29,6 +29,7 @@
+ add_executable(ot-cli-ftd
+     cli_uart.cpp
+     main.c
++    preferred_parent_cli.cpp
+ )
+ 
+ target_include_directories(ot-cli-ftd PRIVATE ${COMMON_INCLUDES})
+diff --git a/examples/apps/cli/main.c b/examples/apps/cli/main.c
+index d13ed203c..5f9a0917f 100644
+--- a/examples/apps/cli/main.c
++++ b/examples/apps/cli/main.c
+@@ -45,6 +45,7 @@
+ #include "common/code_utils.hpp"
+ 
+ #include "lib/platform/reset_util.h"
++#include "preferred_parent_cli.h"
+ 
+ /**
+  * Initializes the CLI app.
+@@ -77,6 +78,7 @@ extern otError ProcessTrelTest(void *aContext, uint8_t aArgsLength, char *aArgs[
+ #endif
+ 
+ static const otCliCommand kCommands[] = {
++    {"prefparent", otPreferredParentCliCommand},
+     {"exit", ProcessExit},
+ #if OPENTHREAD_EXAMPLES_SIMULATION
+     /*
+@@ -138,6 +140,7 @@ pseudo_reset:
+     assert(instance);
+ 
+     otAppCliInit(instance);
++    otPreferredParentCliInit(instance);
+ 
+ #if OPENTHREAD_POSIX && !defined(FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION)
+     IgnoreError(otCliSetUserCommands(kCommands, OT_ARRAY_LENGTH(kCommands), instance));
+diff --git a/examples/apps/cli/mtd.cmake b/examples/apps/cli/mtd.cmake
+index cef614bd9..0e2804bbc 100644
+--- a/examples/apps/cli/mtd.cmake
++++ b/examples/apps/cli/mtd.cmake
+@@ -29,6 +29,7 @@
+ add_executable(ot-cli-mtd
+     cli_uart.cpp
+     main.c
++    preferred_parent_cli.cpp
+ )
+ 
+ target_include_directories(ot-cli-mtd PRIVATE ${COMMON_INCLUDES})
+diff --git a/examples/apps/cli/preferred_parent_cli.cpp b/examples/apps/cli/preferred_parent_cli.cpp
+new file mode 100644
+index 000000000..58dbe0569
+--- /dev/null
++++ b/examples/apps/cli/preferred_parent_cli.cpp
+@@ -0,0 +1,165 @@
++/*
++ * Copyright (c) 2026, The OpenThread Authors.
++ * All rights reserved.
++ * SPDX-License-Identifier: BSD-3-Clause
++ */
++
++#include "preferred_parent_cli.h"
++
++#include <string.h>
++#include <openthread/cli.h>
++#include <openthread/platform/alarm-micro.h>
++#include <openthread/preferred_parent.h>
++
++#include "common/code_utils.hpp"
++
++namespace {
++
++otInstance *sInstance;
++
++int HexDigit(char aChar)
++{
++    if ((aChar >= '0') && (aChar <= '9')) return aChar - '0';
++    if ((aChar >= 'a') && (aChar <= 'f')) return aChar - 'a' + 10;
++    if ((aChar >= 'A') && (aChar <= 'F')) return aChar - 'A' + 10;
++    return -1;
++}
++
++otError ParseExtAddress(const char *aText, otExtAddress &aAddress)
++{
++    uint8_t byteIndex = 0;
++    int     highNibble = -1;
++
++    memset(&aAddress, 0, sizeof(aAddress));
++    for (const char *cur = aText; *cur != '\0'; cur++)
++    {
++        int value;
++
++        if ((*cur == ':') || (*cur == '-')) continue;
++        value = HexDigit(*cur);
++        if (value < 0) return OT_ERROR_INVALID_ARGS;
++        if (highNibble < 0)
++        {
++            highNibble = value;
++        }
++        else
++        {
++            if (byteIndex >= sizeof(aAddress.m8)) return OT_ERROR_INVALID_ARGS;
++            aAddress.m8[byteIndex++] = static_cast<uint8_t>((highNibble << 4) | value);
++            highNibble = -1;
++        }
++    }
++
++    return ((byteIndex == sizeof(aAddress.m8)) && (highNibble < 0)) ? OT_ERROR_NONE : OT_ERROR_INVALID_ARGS;
++}
++
++void OutputExtAddress(const otExtAddress &aAddress)
++{
++    for (uint8_t byte : aAddress.m8) otCliOutputFormat("%02x", byte);
++}
++
++const char *ModeToString(otThreadPreferredParentMode aMode)
++{
++    (void)aMode; return "unicast";
++}
++
++const char *StateToString(otThreadPreferredParentState aState)
++{
++    static const char *const kNames[] = {
++        "idle", "starting_discovery", "waiting_parent_request", "waiting_target_response",
++        "continuing_selected_attach", "waiting_child_id_response", "succeeded", "failed", "timed_out", "cancelled",
++    };
++    return (static_cast<unsigned int>(aState) < (sizeof(kNames) / sizeof(kNames[0]))) ? kNames[aState] : "unknown";
++}
++
++const char *ResultToString(otThreadPreferredParentResult aResult)
++{
++    static const char *const kNames[] = {
++        "none", "success", "start_failed", "target_timeout", "attach_timeout", "role_changed", "cancelled",
++    };
++    return (static_cast<unsigned int>(aResult) < (sizeof(kNames) / sizeof(kNames[0]))) ? kNames[aResult] : "unknown";
++}
++
++const char *EventToString(otThreadPreferredParentEvent aEvent)
++{
++    static const char *const kNames[] = {
++        "requested", "parent_request_started", "target_response", "child_id_request_started",
++        "succeeded", "failed", "timed_out", "cancelled", "cleared",
++    };
++    return (static_cast<unsigned int>(aEvent) < (sizeof(kNames) / sizeof(kNames[0]))) ? kNames[aEvent] : "unknown";
++}
++
++void HandleEvent(const otThreadPreferredParentEventInfo *aInfo, void *)
++{
++    otCliOutputFormat("PREFPARENT event=%s generation=%lu attempt=%u state=%s target=",
++                      EventToString(aInfo->mEvent), static_cast<unsigned long>(aInfo->mStatus.mGeneration),
++                      aInfo->mStatus.mAttempt, StateToString(aInfo->mStatus.mState));
++    OutputExtAddress(aInfo->mStatus.mExtAddress);
++    otCliOutputFormat(" mode=%s result=%s", ModeToString(aInfo->mStatus.mMode), ResultToString(aInfo->mStatus.mResult));
++    if (aInfo->mEvent == OT_THREAD_PREFERRED_PARENT_EVENT_TARGET_RESPONSE)
++    {
++        otCliOutputFormat(" rloc16=%04x rssi=%d", aInfo->mParentRloc16, aInfo->mParentRssi);
++    }
++    otCliOutputFormat(" error=%s time_us=%lu timing_source=otns_openthread_event resolution_us=1\r\n",
++                      otThreadErrorToString(aInfo->mStatus.mError),
++                      static_cast<unsigned long>(otPlatAlarmMicroGetNow()));
++}
++
++otError StartSwitch(const char *aTarget, const char *aMode)
++{
++    otThreadPreferredParentConfig config;
++    otError                       error;
++
++    memset(&config, 0, sizeof(config));
++    SuccessOrExit(error = ParseExtAddress(aTarget, config.mExtAddress));
++    if (strcmp(aMode, "unicast") != 0)
++    {
++        ExitNow(error = OT_ERROR_INVALID_ARGS);
++    }
++    else if (strcmp(aMode, "unicast") == 0)
++    {
++        config.mMode = OT_THREAD_PREFERRED_PARENT_MODE_UNICAST;
++    }
++    else
++    {
++        ExitNow(error = OT_ERROR_INVALID_ARGS);
++    }
++    config.mMaxAttempts  = 5;
++    config.mRetryInterval = 8000;
++    config.mAttachTimeout = 16000;
++    error = otThreadPreferredParentStart(sInstance, &config);
++
++exit:
++    return error;
++}
++
++otError OutputStatus(void)
++{
++    otThreadPreferredParentStatus status;
++
++    otThreadPreferredParentGetStatus(sInstance, &status);
++    otCliOutputFormat("PREFPARENT event=status state=%s generation=%lu attempt=%u max_attempts=%u target=",
++                      StateToString(status.mState), static_cast<unsigned long>(status.mGeneration),
++                      status.mAttempt, status.mMaxAttempts);
++    OutputExtAddress(status.mExtAddress);
++    otCliOutputFormat(" mode=%s result=%s error=%s\r\n", ModeToString(status.mMode), ResultToString(status.mResult),
++                      otThreadErrorToString(status.mError));
++    return OT_ERROR_NONE;
++}
++
++} // namespace
++
++extern "C" void otPreferredParentCliInit(otInstance *aInstance)
++{
++    sInstance = aInstance;
++    IgnoreError(otThreadPreferredParentSetCallback(aInstance, HandleEvent, nullptr));
++}
++
++extern "C" otError otPreferredParentCliCommand(void *, uint8_t aArgsLength, char *aArgs[])
++{
++    if ((aArgsLength == 1) && (strcmp(aArgs[0], "status") == 0)) return OutputStatus();
++    if ((aArgsLength == 1) && (strcmp(aArgs[0], "cancel") == 0)) return otThreadPreferredParentCancel(sInstance);
++    if ((aArgsLength == 1) && (strcmp(aArgs[0], "clear") == 0)) return otThreadPreferredParentClear(sInstance);
++    if ((aArgsLength == 3) && (strcmp(aArgs[0], "switch") == 0)) return StartSwitch(aArgs[1], aArgs[2]);
++    return OT_ERROR_INVALID_ARGS;
++}
+diff --git a/examples/apps/cli/preferred_parent_cli.h b/examples/apps/cli/preferred_parent_cli.h
+new file mode 100644
+index 000000000..6e1c65777
+--- /dev/null
++++ b/examples/apps/cli/preferred_parent_cli.h
+@@ -0,0 +1,24 @@
++/*
++ * Copyright (c) 2026, The OpenThread Authors.
++ * All rights reserved.
++ * SPDX-License-Identifier: BSD-3-Clause
++ */
++
++#ifndef OT_APP_CLI_PREFERRED_PARENT_CLI_H_
++#define OT_APP_CLI_PREFERRED_PARENT_CLI_H_
++
++#include <openthread/error.h>
++#include <openthread/instance.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++void    otPreferredParentCliInit(otInstance *aInstance);
++otError otPreferredParentCliCommand(void *aContext, uint8_t aArgsLength, char *aArgs[]);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif

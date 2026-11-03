@@ -1,0 +1,361 @@
+diff --git a/include/openthread/thread.h b/include/openthread/thread.h
+index de5b1373a..2623f40e3 100644
+--- a/include/openthread/thread.h
++++ b/include/openthread/thread.h
+@@ -249,6 +249,44 @@ typedef void (*otWakeupCallback)(otError aError, void *aContext);
+  */
+ otError otThreadSetEnabled(otInstance *aInstance, bool aEnabled);
+ 
++/**
++ * Enables or disables MLE Fast Attach.
++ *
++ * When enabled, this device sets the F flag in Parent Request Scan Mask TLVs and selects a
++ * Parent as soon as the first acceptable LQ3 Parent Response arrives, instead of waiting
++ * for the full `MLE_PARENT_REQ_SCANMASK_R_TIMEOUT`.
++ *
++ * Available only when `OPENTHREAD_CONFIG_MLE_FAST_ATTACH_ENABLE` is 1. Defaults to disabled.
++ *
++ * Fast Attach is one-shot: it is automatically cleared on successful attach, so the
++ * application must re-enable it per attach attempt. Listen for `OT_CHANGED_THREAD_ROLE`
++ * via `otSetStateChangedCallback` to detect detach and re-arm as needed.
++ *
++ * Enabling is allowed only while the device is not attached (role Disabled or Detached).
++ * Disabling is always allowed.
++ *
++ * Note: Router-side handling of an incoming F flag is always-on and does not require
++ * this API; any Router/Leader honors F=1 by applying reduced response jitter.
++ *
++ * @param[in] aInstance  A pointer to an OpenThread instance.
++ * @param[in] aEnabled   TRUE to enable Fast Attach, FALSE to disable.
++ *
++ * @retval OT_ERROR_NONE           Setting applied.
++ * @retval OT_ERROR_INVALID_STATE  Tried to enable while already attached.
++ */
++otError otThreadSetFastAttachEnabled(otInstance *aInstance, bool aEnabled);
++
++/**
++ * Indicates whether MLE Fast Attach is enabled at runtime.
++ *
++ * Available only when `OPENTHREAD_CONFIG_MLE_FAST_ATTACH_ENABLE` is 1.
++ *
++ * @param[in] aInstance  A pointer to an OpenThread instance.
++ *
++ * @returns TRUE if Fast Attach is enabled, FALSE otherwise.
++ */
++bool otThreadIsFastAttachEnabled(otInstance *aInstance);
++
+ /**
+  * Gets the Thread protocol version.
+  *
+diff --git a/src/cli/cli.cpp b/src/cli/cli.cpp
+index 53b01d023..052de52f2 100644
+--- a/src/cli/cli.cpp
++++ b/src/cli/cli.cpp
+@@ -4160,6 +4160,44 @@ template <> otError Interpreter::Process<Cmd("mleadvimax")>(Arg aArgs[])
+ }
+ #endif
+ 
++#if OPENTHREAD_CONFIG_MLE_FAST_ATTACH_ENABLE
++template <> otError Interpreter::Process<Cmd("mle")>(Arg aArgs[])
++{
++    otError error = OT_ERROR_INVALID_COMMAND;
++
++    /**
++     * @cli mle fastattach
++     * @code
++     * mle fastattach
++     * Disabled
++     * Done
++     * @endcode
++     * @code
++     * mle fastattach enable
++     * Done
++     * @endcode
++     * @code
++     * mle fastattach disable
++     * Done
++     * @endcode
++     * @cparam mle fastattach [@ca{enable|disable}]
++     * @par
++     * Gets, enables, or disables MLE Fast Attach. Defaults to disabled. Fast Attach is one-shot:
++     * enabling is allowed only while the device is not attached (role Disabled or Detached), and
++     * the flag is auto-cleared on successful attach. The application must re-enable per attach
++     * attempt.
++     * @sa otThreadIsFastAttachEnabled
++     * @sa otThreadSetFastAttachEnabled
++     */
++    if (aArgs[0] == "fastattach")
++    {
++        error = ProcessEnableDisable(aArgs + 1, otThreadIsFastAttachEnabled, otThreadSetFastAttachEnabled);
++    }
++
++    return error;
++}
++#endif
++
+ #if OPENTHREAD_CONFIG_REFERENCE_DEVICE_ENABLE
+ /**
+  * @cli mliid
+@@ -8651,6 +8689,9 @@ otError Interpreter::ProcessCommand(Arg aArgs[])
+ #if OPENTHREAD_CONFIG_MESH_DIAG_ENABLE && OPENTHREAD_FTD
+         CmdEntry("meshdiag"),
+ #endif
++#if OPENTHREAD_CONFIG_MLE_FAST_ATTACH_ENABLE
++        CmdEntry("mle"),
++#endif
+ #if OPENTHREAD_FTD && OPENTHREAD_CONFIG_REFERENCE_DEVICE_ENABLE
+         CmdEntry("mleadvimax"),
+ #endif
+diff --git a/src/core/api/thread_api.cpp b/src/core/api/thread_api.cpp
+index 6c1a910ac..3623fe721 100644
+--- a/src/core/api/thread_api.cpp
++++ b/src/core/api/thread_api.cpp
+@@ -360,6 +360,18 @@ otError otThreadSetEnabled(otInstance *aInstance, bool aEnabled)
+     return error;
+ }
+ 
++#if OPENTHREAD_CONFIG_MLE_FAST_ATTACH_ENABLE
++otError otThreadSetFastAttachEnabled(otInstance *aInstance, bool aEnabled)
++{
++    return AsCoreType(aInstance).Get<Mle::Mle>().SetFastAttachEnabled(aEnabled);
++}
++
++bool otThreadIsFastAttachEnabled(otInstance *aInstance)
++{
++    return AsCoreType(aInstance).Get<Mle::Mle>().IsFastAttachEnabled();
++}
++#endif
++
+ uint16_t otThreadGetVersion(void) { return kThreadVersion; }
+ 
+ bool otThreadIsSingleton(otInstance *aInstance)
+diff --git a/src/core/config/mle.h b/src/core/config/mle.h
+index df2e43e41..38ec3bd90 100644
+--- a/src/core/config/mle.h
++++ b/src/core/config/mle.h
+@@ -348,6 +348,20 @@
+ #define OPENTHREAD_CONFIG_DYNAMIC_STORE_FRAME_AHEAD_COUNTER_ENABLE 0
+ #endif
+ 
++/**
++ * @def OPENTHREAD_CONFIG_MLE_FAST_ATTACH_ENABLE
++ *
++ * Define as 1 to enable the Child-side MLE Fast Attach feature. When enabled, the application
++ * may opt in (per attach attempt) via `otThreadSetFastAttachEnabled()` to set the F flag in
++ * its Parent Request and early-select a Parent on the first acceptable LQ3 Parent Response.
++ *
++ * Note: Router-side handling of the F flag (reduced response jitter) is always-on standard
++ * behavior and is independent of this compile flag.
++ */
++#ifndef OPENTHREAD_CONFIG_MLE_FAST_ATTACH_ENABLE
++#define OPENTHREAD_CONFIG_MLE_FAST_ATTACH_ENABLE 1
++#endif
++
+ /**
+  * @}
+  */
+diff --git a/src/core/thread/mle.cpp b/src/core/thread/mle.cpp
+index cb8d34679..0c53c978a 100644
+--- a/src/core/thread/mle.cpp
++++ b/src/core/thread/mle.cpp
+@@ -49,6 +49,9 @@ const otMeshLocalPrefix Mle::kMeshLocalPrefixInit = {
+ 
+ Mle::Mle(Instance &aInstance)
+     : InstanceLocator(aInstance)
++#if OPENTHREAD_CONFIG_MLE_FAST_ATTACH_ENABLE
++    , mFastAttachEnabled(false)
++#endif
+     , mRetrieveNewNetworkData(false)
+     , mRequestRouteTlv(false)
+     , mHasRestored(false)
+@@ -566,6 +569,19 @@ bool Mle::IsAttached(void) const { return (IsChild() || IsRouter() || IsLeader()
+ 
+ bool Mle::IsRouterOrLeader(void) const { return (IsRouter() || IsLeader()); }
+ 
++#if OPENTHREAD_CONFIG_MLE_FAST_ATTACH_ENABLE
++Error Mle::SetFastAttachEnabled(bool aEnabled)
++{
++    Error error = kErrorNone;
++
++    VerifyOrExit(!aEnabled || !IsAttached(), error = kErrorInvalidState);
++    mFastAttachEnabled = aEnabled;
++
++exit:
++    return error;
++}
++#endif
++
+ void Mle::SetStateDetached(void)
+ {
+ #if OPENTHREAD_FTD && OPENTHREAD_CONFIG_BACKBONE_ROUTER_ENABLE
+@@ -5026,6 +5042,16 @@ void Mle::Attacher::SendParentRequest(ParentRequestType aType)
+         break;
+     }
+ 
++#if OPENTHREAD_CONFIG_MLE_FAST_ATTACH_ENABLE
++    // Set the F flag to request fast-attach behavior from responding Routers.
++    // Suppressed in opportunistic background scans (kBetterPartition / kBetterParent) where
++    // the "first acceptable wins" policy could regress parent-quality selection.
++    if (Get<Mle>().mFastAttachEnabled && mMode != kBetterPartition && mMode != kBetterParent)
++    {
++        scanMask |= ScanMaskTlv::kFastAttachFlag;
++    }
++#endif
++
+     VerifyOrExit((message = Get<Mle>().NewMleMessage(kCommandParentRequest)) != nullptr, error = kErrorNoBufs);
+     SuccessOrExit(error = message->AppendModeTlv());
+     SuccessOrExit(error = message->AppendChallengeTlv(mParentRequestChallenge));
+@@ -5440,6 +5466,20 @@ void Mle::Attacher::HandleParentResponse(RxInfo &aRxInfo)
+     mParentCandidate.mLeaderData   = leaderData;
+     mParentCandidate.mLinkMargin   = twoWayLinkMargin;
+ 
++#if OPENTHREAD_CONFIG_MLE_FAST_ATTACH_ENABLE
++    // Trigger immediate parent selection when fast-attach is engaged and the new
++    // candidate is acceptable at LQ3. The tight LQ3 gate here closes the REED-phase regression
++    // (LQ1 REED winning a random race) without modifying HasAcceptableParentCandidate(), so the
++    // legacy timeout path retains its existing semantics. mTimer.Start(0) cancels the in-flight
++    // kParentRequestRouterTimeout and posts a fire-now event; HandleTimer() then drives
++    // SendChildIdRequest() via its existing path.
++    if (Get<Mle>().mFastAttachEnabled && mState == kStateParentRequest &&
++        mParentCandidate.GetTwoWayLinkQuality() == kLinkQuality3 && HasAcceptableParentCandidate())
++    {
++        mTimer.Start(0);
++    }
++#endif
++
+ exit:
+     LogProcessError(kTypeParentResponse, error);
+ }
+@@ -5537,6 +5577,12 @@ void Mle::Attacher::HandleChildIdResponse(RxInfo &aRxInfo)
+ 
+     Get<Mle>().SetStateChild(shortAddress);
+ 
++#if OPENTHREAD_CONFIG_MLE_FAST_ATTACH_ENABLE
++    // One-shot semantics: clear Fast Attach intent on successful attach so the
++    // application must re-enable per attempt.
++    Get<Mle>().mFastAttachEnabled = false;
++#endif
++
+     if (!Get<Mle>().IsRxOnWhenIdle())
+     {
+         Get<DataPollSender>().SetAttachMode(false);
+diff --git a/src/core/thread/mle.hpp b/src/core/thread/mle.hpp
+index c75f46273..eccd2557a 100644
+--- a/src/core/thread/mle.hpp
++++ b/src/core/thread/mle.hpp
+@@ -344,6 +344,30 @@ public:
+      */
+     NetworkData::Type GetNetworkDataType(void) const { return mDeviceMode.GetNetworkDataType(); }
+ 
++#if OPENTHREAD_CONFIG_MLE_FAST_ATTACH_ENABLE
++    /**
++     * Indicates whether MLE Fast Attach is enabled at runtime.
++     *
++     * @returns TRUE if Fast Attach is enabled, FALSE otherwise.
++     */
++    bool IsFastAttachEnabled(void) const { return mFastAttachEnabled; }
++
++    /**
++     * Enables or disables MLE Fast Attach at runtime.
++     *
++     * Fast Attach is one-shot: it is auto-cleared on successful attach. The
++     * application must re-enable per attach attempt. Enabling is allowed only
++     * while the device is not attached (i.e., role is Disabled or Detached).
++     * Disabling is always allowed.
++     *
++     * @param[in] aEnabled  TRUE to enable, FALSE to disable.
++     *
++     * @retval kErrorNone          Setting applied.
++     * @retval kErrorInvalidState  Tried to enable while attached (Child/Router/Leader).
++     */
++    Error SetFastAttachEnabled(bool aEnabled);
++#endif
++
+     /**
+      * Returns a pointer to the Mesh Local Prefix.
+      *
+@@ -1315,6 +1339,8 @@ private:
+     static constexpr uint32_t kMulticastRetxDelayMax         = kMulticastRetxDelay * 11 / 10; // 1.1 * base delay
+     static constexpr uint32_t kAnnounceBackoffForPendingDataset = 60000; // Max delay left to block Announce processing.
+ 
++    static constexpr uint32_t kFastAttachJitterPerRouter = 32; // MLE_FAST_ATTACH_JITTER_PER_ROUTER, ms
++
+     static constexpr uint8_t kMaxTxCount                = 3; // Max tx count for MLE message
+     static constexpr uint8_t kMaxCriticalTxCount        = 6; // Max tx count for critical MLE message
+     static constexpr uint8_t kMaxChildKeepAliveAttempts = 4; // Max keep alive attempts before reattach
+@@ -2586,6 +2612,10 @@ private:
+ 
+     static const otMeshLocalPrefix kMeshLocalPrefixInit;
+ 
++#if OPENTHREAD_CONFIG_MLE_FAST_ATTACH_ENABLE
++    bool mFastAttachEnabled : 1;
++#endif
++
+     bool       mRetrieveNewNetworkData : 1;
+     bool       mRequestRouteTlv : 1;
+     bool       mHasRestored : 1;
+diff --git a/src/core/thread/mle_ftd.cpp b/src/core/thread/mle_ftd.cpp
+index d01925063..33f388079 100644
+--- a/src/core/thread/mle_ftd.cpp
++++ b/src/core/thread/mle_ftd.cpp
+@@ -1531,6 +1531,7 @@ void Mle::HandleParentRequest(RxInfo &aRxInfo)
+     Child             *child;
+     DeviceMode         mode;
+     uint32_t           delay;
++    uint32_t           maxDelay;
+     ParentResponseInfo info;
+ 
+     Log(kMessageReceive, kTypeParentRequest, aRxInfo.mMessageInfo.GetPeerAddr());
+@@ -1601,8 +1602,17 @@ void Mle::HandleParentRequest(RxInfo &aRxInfo)
+     aRxInfo.mClass = RxInfo::kPeerMessage;
+     ProcessKeySequence(aRxInfo);
+ 
+-    delay = GenerateRandomDelay(!ScanMaskTlv::IsEndDeviceFlagSet(scanMask) ? kParentResponseMaxDelayRouters
+-                                                                           : kParentResponseMaxDelayAll);
++    maxDelay = !ScanMaskTlv::IsEndDeviceFlagSet(scanMask) ? kParentResponseMaxDelayRouters : kParentResponseMaxDelayAll;
++
++    if (ScanMaskTlv::IsFastAttachFlagSet(scanMask) && IsRouterOrLeader())
++    {
++        maxDelay = Min(maxDelay, mRouterTable.GetActiveRouterCount() * kFastAttachJitterPerRouter);
++    }
++
++    delay = GenerateRandomDelay(maxDelay);
++    // FAST_ATTACH_PARENT_RESPONSE_DELAY_DIAGNOSTIC
++    LogNote("ParentResponseDelay delay_ms=%lu scan_mask=0x%02x child=%s", ToUlong(delay), scanMask,
++            info.mChildExtAddress.ToString().AsCString());
+     mDelayedSender.ScheduleParentResponse(info, delay);
+ 
+ exit:
+diff --git a/src/core/thread/mle_tlvs.hpp b/src/core/thread/mle_tlvs.hpp
+index 14f770f35..34d95195d 100644
+--- a/src/core/thread/mle_tlvs.hpp
++++ b/src/core/thread/mle_tlvs.hpp
+@@ -476,8 +476,9 @@ typedef SimpleTlvInfo<Tlv::kLeaderData, LeaderDataTlvValue> LeaderDataTlv;
+ class ScanMaskTlv : public UintTlvInfo<Tlv::kScanMask, uint8_t>
+ {
+ public:
+-    static constexpr uint8_t kRouterFlag    = 1 << 7; ///< Scan Mask Router Flag.
+-    static constexpr uint8_t kEndDeviceFlag = 1 << 6; ///< Scan Mask End Device Flag.
++    static constexpr uint8_t kRouterFlag     = 1 << 7; ///< Scan Mask Router Flag.
++    static constexpr uint8_t kEndDeviceFlag  = 1 << 6; ///< Scan Mask End Device Flag.
++    static constexpr uint8_t kFastAttachFlag = 1 << 5; ///< Scan Mask Fast Attach Flag.
+ 
+     /**
+      * Indicates whether or not the Router flag is set.
+@@ -498,6 +499,16 @@ public:
+      * @retval FALSE  If the End Device flag is not set.
+      */
+     static bool IsEndDeviceFlagSet(uint8_t aMask) { return (aMask & kEndDeviceFlag) != 0; }
++
++    /**
++     * Indicates whether or not the Fast Attach flag is set.
++     *
++     * @param[in] aMask   A scan mask value.
++     *
++     * @retval TRUE   If the Fast Attach flag is set.
++     * @retval FALSE  If the Fast Attach flag is not set.
++     */
++    static bool IsFastAttachFlagSet(uint8_t aMask) { return (aMask & kFastAttachFlag) != 0; }
+ };
+ 
+ /**

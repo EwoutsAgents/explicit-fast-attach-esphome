@@ -1,0 +1,729 @@
+--- a/src/core/thread/mle.hpp
++++ b/src/core/thread/mle.hpp
+@@ -452,6 +452,50 @@
+     Error SearchForBetterParent(void);
+ 
+     /**
++     * Starts targeted attach flow to a selected parent by extended address.
++     *
++     * This is an ESPHome Thread preferred-parent extension. It reuses
++     * OpenThread's internal selected-parent attach mode.
++     *
++     * @param[in] aExtAddress Extended address of the selected parent candidate.
++     *
++     * @retval kErrorNone Successfully started selected-parent attach flow.
++     * @retval kErrorInvalidState Thread is not attached as a child.
++     * @retval kErrorBusy An attach process is already in progress.
++     */
++    Error AttachToSelectedParent(const Mac::ExtAddress &aExtAddress); // THREAD_PREFERRED_PARENT_SELECTED_PARENT_HOOK
++
++    /**
++     * Continues a discovery-observed attach directly with Child ID Request.
++     *
++     * This is an ESPHome Thread preferred-parent extension. It reuses the
++     * Parent Response already cached during a non-disruptive discovery window
++     * instead of restarting with another Parent Request.
++     *
++     * @param[in] aExtAddress Extended address of the selected parent candidate.
++     *
++     * @retval kErrorNone Successfully started Child ID Request.
++     * @retval kErrorInvalidState Discovery is not active or no valid candidate is cached.
++     * @retval kErrorNotFound Cached candidate does not match `aExtAddress`.
++     */
++    /**
++     * Starts a targeted better-parent discovery by entering ParentReq immediately.
++     *
++     * This is an ESPHome Thread preferred-parent extension. It keeps discovery
++     * inside OpenThread's Attacher machinery, but skips the delayed Start-state
++     * timer when the target extended address is already known.
++     *
++     * @param[in] aExtAddress Extended address of the discovery target parent.
++     *
++     * @retval kErrorNone Successfully started Parent Request discovery.
++     * @retval kErrorInvalidState Thread is not attached as a child.
++     * @retval kErrorBusy An attach process is already in progress.
++     */
++    Error StartParentDiscoveryUnicastNow(const Mac::ExtAddress &aExtAddress); // THREAD_PREFERRED_PARENT_DISCOVERY_UNICAST_NOW_HOOK
++
++    Error ContinueSelectedParentAttachFromDiscovery(const Mac::ExtAddress &aExtAddress); // THREAD_PREFERRED_PARENT_DISCOVERY_CONTINUE_HOOK
++
++    /**
+      * Indicates whether or not an IPv6 address is an RLOC.
+      *
+      * @retval TRUE   If @p aAddress is an RLOC.
+@@ -1882,6 +1926,8 @@
+         bool             IsReattachWithDatasetDone(void) const { return mReattachMode == kReattachModeStop; }
+         void             Start(StartMode aMode);
+         void             Attach(AttachMode aMode);
++        Error StartParentRequestNow(const Mac::ExtAddress &aExtAddress); // THREAD_PREFERRED_PARENT_DISCOVERY_UNICAST_NOW_HOOK
++        Error ContinueSelectedParentAttach(const Mac::ExtAddress &aExtAddress); // THREAD_PREFERRED_PARENT_DISCOVERY_CONTINUE_HOOK
+         void             CancelAttachOnRoleChange(void);
+         void             ResetAttachCounter(void) { mAttachCounter = 0; }
+         AttachMode       GetAttachMode(void) const { return mMode; }
+@@ -1949,6 +1995,10 @@
+         uint16_t                mAnnounceDelay;
+         TxChallenge             mParentRequestChallenge;
+         ParentCandidate         mParentCandidate;
++        ParentCandidate         mPreferredDiscoveryParentCandidate; // THREAD_PREFERRED_PARENT_DISCOVERY_TARGET_SNAPSHOT_HOOK
++        bool                    mHasPreferredDiscoveryParentCandidate : 1; // THREAD_PREFERRED_PARENT_DISCOVERY_TARGET_SNAPSHOT_HOOK
++        bool                    mThreadPreferredParentFastDiscoveryForcedRxOn : 1; // THREAD_PREFERRED_PARENT_DISCOVERY_UNICAST_NOW_HOOK
++        bool                    mThreadPreferredParentFastDiscoveryWasRxOn : 1; // THREAD_PREFERRED_PARENT_DISCOVERY_UNICAST_NOW_HOOK
+         AttachTimer             mTimer;
+     };
+ 
+--- a/src/core/thread/mle.cpp
++++ b/src/core/thread/mle.cpp
+@@ -38,6 +38,23 @@
+ #include "radio/ble_secure.hpp"
+ #include "utils/static_counter.hpp"
+ 
++#include <openthread/thread.h>
++
++extern "C" void thread_preferred_parent_ot_notify_parent_response(const otThreadParentResponseInfo *aInfo);
++extern "C" void thread_preferred_parent_ot_notify_parent_req_started(void);
++extern "C" void thread_preferred_parent_ot_notify_attacher_state(uint8_t aState);
++extern "C" bool thread_preferred_parent_ot_parent_discovery_active;
++extern "C" bool thread_preferred_parent_ot_parent_discovery_unicast;
++extern "C" otExtAddress thread_preferred_parent_ot_parent_discovery_extaddr;
++extern "C" bool thread_preferred_parent_ot_parent_discovery_target_valid;
++extern "C" otExtAddress thread_preferred_parent_ot_parent_discovery_target_extaddr;
++// THREAD_PREFERRED_PARENT_PARENT_RESPONSE_REPORTING_HOOK
++// THREAD_PREFERRED_PARENT_PARENT_REQ_STARTED_HOOK
++// THREAD_PREFERRED_PARENT_ATTACHER_STATE_HOOK
++// THREAD_PREFERRED_PARENT_DISCOVERY_ONLY_HOOK
++// THREAD_PREFERRED_PARENT_DISCOVERY_UNICAST_HOOK
++// THREAD_PREFERRED_PARENT_DISCOVERY_TARGET_HINT_HOOK
++
+ namespace ot {
+ namespace Mle {
+ 
+@@ -572,6 +589,70 @@
+     return error;
+ }
+ 
++
++Error Mle::AttachToSelectedParent(const Mac::ExtAddress &aExtAddress)
++{
++    // THREAD_PREFERRED_PARENT_SELECTED_PARENT_HOOK
++    Error error = kErrorNone;
++
++    VerifyOrExit(IsChild(), error = kErrorInvalidState);
++    if (thread_preferred_parent_ot_parent_discovery_active)
++    {
++        // THREAD_PREFERRED_PARENT_INTERRUPT_DISCOVERY_BEFORE_ATTACH
++        // A requested target was already observed by ESPHome. Interrupt the
++        // discovery-only Parent Request window and immediately begin the
++        // selected-parent attach flow instead of returning kErrorBusy.
++        // Do not declare a local variable here: AttachToSelectedParent() uses
++        // VerifyOrExit()/goto exit, and C++ rejects jumps across initialized
++        // locals in this function on ESP-IDF/OpenThread builds.
++        thread_preferred_parent_ot_parent_discovery_active = false;
++        thread_preferred_parent_ot_parent_discovery_unicast = false;
++    }
++    else
++    {
++        VerifyOrExit(!IsAttaching(), error = kErrorBusy);
++    }
++
++    
++    // THREAD_PREFERRED_PARENT_PRESEED_SELECTED_PARENT
++    // Make the target ExtAddr visible before Attach(kSelectedParent)
++    // in case this OpenThread revision sends the Parent Request
++    // synchronously from Attach(). Repeat after Attach() because
++    // Attach() may clear/reinitialize the parent candidate.
++    mAttacher.GetParentCandidate().SetExtAddress(aExtAddress);
++
++    mAttacher.Attach(kSelectedParent);
++        mAttacher.GetParentCandidate().SetExtAddress(aExtAddress);
++
++exit:
++    return error;
++}
++
++Error Mle::ContinueSelectedParentAttachFromDiscovery(const Mac::ExtAddress &aExtAddress)
++{
++    // THREAD_PREFERRED_PARENT_DISCOVERY_CONTINUE_HOOK
++    Error error = kErrorNone;
++
++    VerifyOrExit(IsChild(), error = kErrorInvalidState);
++    SuccessOrExit(error = mAttacher.ContinueSelectedParentAttach(aExtAddress));
++
++exit:
++    return error;
++}
++
++
++Error Mle::StartParentDiscoveryUnicastNow(const Mac::ExtAddress &aExtAddress)
++{
++    // THREAD_PREFERRED_PARENT_DISCOVERY_UNICAST_NOW_HOOK
++    Error error = kErrorNone;
++
++    VerifyOrExit(IsChild(), error = kErrorInvalidState);
++    SuccessOrExit(error = mAttacher.StartParentRequestNow(aExtAddress));
++
++exit:
++    return error;
++}
++
+ bool Mle::IsAttached(void) const { return (IsChild() || IsRouter() || IsLeader()); }
+ 
+ bool Mle::IsRouterOrLeader(void) const { return (IsRouter() || IsLeader()); }
+@@ -4477,7 +4558,8 @@
+     LogInfo("AttachState %s -> %s", StateToString(mState), StateToString(aState));
+     mState = aState;
+ 
+-exit:
++thread_preferred_parent_ot_notify_attacher_state(static_cast<uint8_t>(mState));
++    exit:
+     return;
+ }
+ 
+@@ -4537,6 +4619,130 @@
+     return;
+ }
+ 
++
++Error Mle::Attacher::ContinueSelectedParentAttach(const Mac::ExtAddress &aExtAddress)
++{
++    // THREAD_PREFERRED_PARENT_DISCOVERY_CONTINUE_HOOK
++    Error error = kErrorNone;
++
++    LogNote("SelectedParent continue start cached=%d mode=%d state=%d discovery=%d candState=%d cand=0x%04x target=%s",
++            mHasPreferredDiscoveryParentCandidate, mMode, mState, thread_preferred_parent_ot_parent_discovery_active,
++            mParentCandidate.IsStateParentResponse(), mParentCandidate.GetRloc16(), aExtAddress.ToString().AsCString());
++
++    if (mHasPreferredDiscoveryParentCandidate)
++    {
++        LogNote("SelectedParent continue using cached candidate extaddr=%s rloc16=0x%04x",
++                mPreferredDiscoveryParentCandidate.GetExtAddress().ToString().AsCString(),
++                mPreferredDiscoveryParentCandidate.GetRloc16());
++        VerifyOrExit(mPreferredDiscoveryParentCandidate.GetExtAddress() == aExtAddress, error = kErrorNotFound);
++        mParentCandidate = mPreferredDiscoveryParentCandidate;
++    }
++    else
++    {
++        LogNote("SelectedParent continue no cached candidate live extaddr=%s rloc16=0x%04x",
++                mParentCandidate.GetExtAddress().ToString().AsCString(), mParentCandidate.GetRloc16());
++        VerifyOrExit(thread_preferred_parent_ot_parent_discovery_active, error = kErrorInvalidState);
++        VerifyOrExit(mMode == kBetterParent, error = kErrorInvalidState);
++        VerifyOrExit(mState == kStateParentRequest, error = kErrorInvalidState);
++        VerifyOrExit(mParentCandidate.IsStateParentResponse(), error = kErrorInvalidState);
++        VerifyOrExit(mParentCandidate.GetExtAddress() == aExtAddress, error = kErrorNotFound);
++    }
++
++    thread_preferred_parent_ot_parent_discovery_active = false;
++    thread_preferred_parent_ot_parent_discovery_unicast = false;
++    mHasPreferredDiscoveryParentCandidate = false;
++    mMode = kSelectedParent;
++
++    SetState(kStateIdle);
++    SetState(kStateChildIdRequest);
++    mTimer.Start(kChildIdResponseTimeout);
++    LogNote("SelectedParent ChildIdRequest armed-before-send cand=0x%04x state=%d timeout=%lu",
++            mParentCandidate.GetRloc16(), mState, ToUlong(kChildIdResponseTimeout));
++    SuccessOrExit(error = SendChildIdRequest());
++    LogNote("SelectedParent ChildIdRequest continued-from-discovery cand=0x%04x timeout=%lu",
++            mParentCandidate.GetRloc16(), ToUlong(kChildIdResponseTimeout));
++
++exit:
++    if (error != kErrorNone)
++    {
++        mTimer.Stop();
++        SetState(kStateIdle);
++        LogWarn("SelectedParent continue failed err=%s cached=%d mode=%d state=%d discovery=%d candState=%d cand=0x%04x target=%s",
++                ErrorToString(error), mHasPreferredDiscoveryParentCandidate, mMode, mState,
++                thread_preferred_parent_ot_parent_discovery_active, mParentCandidate.IsStateParentResponse(),
++                mParentCandidate.GetRloc16(), aExtAddress.ToString().AsCString());
++    }
++    return error;
++}
++
++
++Error Mle::Attacher::StartParentRequestNow(const Mac::ExtAddress &aExtAddress)
++{
++    // THREAD_PREFERRED_PARENT_DISCOVERY_UNICAST_NOW_HOOK
++    Error             error = kErrorNone;
++    ParentRequestType type;
++    uint32_t          delay = 0;
++
++    VerifyOrExit(Get<Mle>().IsChild(), error = kErrorInvalidState);
++    VerifyOrExit(!IsAttaching(), error = kErrorBusy);
++
++#if OPENTHREAD_FTD
++    Get<Mle>().RemoveScheduledParentResponses();
++#endif
++
++    aExtAddress.CopyTo(thread_preferred_parent_ot_parent_discovery_extaddr.m8);
++    thread_preferred_parent_ot_parent_discovery_active = true;
++    thread_preferred_parent_ot_parent_discovery_unicast = true;
++
++    mThreadPreferredParentFastDiscoveryWasRxOn = Get<Mle>().IsRxOnWhenIdle();
++    mThreadPreferredParentFastDiscoveryForcedRxOn = false;
++    mHasPreferredDiscoveryParentCandidate = false;
++    mParentCandidate.Clear();
++    mMode = kBetterParent;
++    SetState(kStateParentRequest);
++    mParentCandidate.SetState(Neighbor::kStateInvalid);
++    mReceivedResponseFromParent = false;
++    mParentRequestCounter       = 1;
++    if (!mThreadPreferredParentFastDiscoveryWasRxOn)
++    {
++        Get<MeshForwarder>().SetRxOnWhenIdle(true);
++        mThreadPreferredParentFastDiscoveryForcedRxOn = true;
++    }
++
++    SuccessOrExit(error = DetermineParentRequestType(type));
++    SendParentRequest(type);
++
++    switch (type)
++    {
++    case kToRouters:
++    case kToSelectedRouter:
++        delay = kParentRequestRouterTimeout;
++        break;
++    case kToRoutersAndReeds:
++        delay = kParentRequestReedTimeout;
++        break;
++    }
++
++    mTimer.Start(delay);
++
++exit:
++    if (error != kErrorNone)
++    {
++        thread_preferred_parent_ot_parent_discovery_active = false;
++        thread_preferred_parent_ot_parent_discovery_unicast = false;
++        if (mThreadPreferredParentFastDiscoveryForcedRxOn && !mThreadPreferredParentFastDiscoveryWasRxOn)
++        {
++            Get<MeshForwarder>().SetRxOnWhenIdle(false);
++        }
++        mThreadPreferredParentFastDiscoveryForcedRxOn = false;
++        mThreadPreferredParentFastDiscoveryWasRxOn = false;
++        mHasPreferredDiscoveryParentCandidate = false;
++        mParentCandidate.Clear();
++        SetState(kStateIdle);
++    }
++    return error;
++}
++
+ uint32_t Mle::Attacher::GetStartDelay(void) const
+ {
+     uint32_t delay = 1;
+@@ -4682,13 +4888,20 @@
+         case kSamePartition:
+         case kDowngradeToReed:
+         case kBetterParent:
+-        case kSelectedParent:
++
+             // Ensure that a Parent Response was received from the
+             // current parent to which the device is attached, so
+             // that the new parent candidate can be compared with the
+             // current parent and confirmed to be preferred.
+             VerifyOrExit(mReceivedResponseFromParent);
+             break;
++
++        case kSelectedParent:
++            // THREAD_PREFERRED_PARENT_SELECTED_PARENT_HOOK
++            // The attach flow is already constrained to the explicitly requested
++            // candidate, so do not require a comparison response from the current
++            // parent before sending the Child ID Request.
++            break;
+         }
+     }
+ 
+@@ -4704,9 +4917,56 @@
+     bool              shouldAnnounce = true;
+     ParentRequestType type;
+ 
+-    // First, check if we are waiting to receive parent responses and
++    
++
++    if (thread_preferred_parent_ot_parent_discovery_active && (mMode == kBetterParent) &&
++        (mState == kStateParentRequest))
++    {
++        // THREAD_PREFERRED_PARENT_DISCOVERY_ONLY_CANCEL
++        // The ESPHome component only wants the Parent Responses in this phase.
++        // Do not proceed to Child ID Request or detach; keep the existing
++        // parent until the target was actually observed.
++        LogNote("ThreadPreferredParent discovery window complete");
++        thread_preferred_parent_ot_parent_discovery_active = false;
++        thread_preferred_parent_ot_parent_discovery_unicast = false;
++        if (mThreadPreferredParentFastDiscoveryForcedRxOn && !mThreadPreferredParentFastDiscoveryWasRxOn)
++        {
++            Get<MeshForwarder>().SetRxOnWhenIdle(false);
++        }
++        mThreadPreferredParentFastDiscoveryForcedRxOn = false;
++        mThreadPreferredParentFastDiscoveryWasRxOn = false;
++        if (!mHasPreferredDiscoveryParentCandidate)
++        {
++            mParentCandidate.Clear();
++        }
++        SetState(kStateIdle);
++        ExitNow();
++    }
++// First, check if we are waiting to receive parent responses and
+     // found an acceptable parent candidate.
+ 
++        if ((mMode == kSelectedParent) && mParentCandidate.IsStateParentResponse())
++        {
++            // THREAD_PREFERRED_PARENT_SELECTED_PARENT_FORCE_CHILD_ID
++            // In selected-parent mode the target has already been constrained
++            // by ExtAddr and a Parent Response has populated mParentCandidate.
++            // Do not let generic "better parent" heuristics veto the explicit
++            // user-requested parent merely because the old parent has stronger
++            // RSSI/link metrics.
++            Error childIdError = SendChildIdRequest();
++            if (childIdError == kErrorNone)
++            {
++                LogNote("SelectedParent ChildIdRequest forced cand=0x%04x timeout=%lu",
++                        mParentCandidate.GetRloc16(), ToUlong(kChildIdResponseTimeout));
++                SetState(kStateChildIdRequest);
++                delay = kChildIdResponseTimeout;
++                ExitNow();
++            }
++
++            LogWarn("SelectedParent ChildIdRequest forced send failed err=%s cand=0x%04x",
++                    ErrorToString(childIdError), mParentCandidate.GetRloc16());
++        }
++
+     if (HasAcceptableParentCandidate() && (SendChildIdRequest() == kErrorNone))
+     {
+         SetState(kStateChildIdRequest);
+@@ -4932,35 +5192,43 @@
+     SuccessOrExit(error = message->AppendTimeRequestTlv());
+ #endif
+ 
+-#if OPENTHREAD_FTD && OPENTHREAD_CONFIG_PARENT_SEARCH_ENABLE
+-    if (aType == kToSelectedRouter)
++    if (thread_preferred_parent_ot_parent_discovery_active && thread_preferred_parent_ot_parent_discovery_unicast)
+     {
++        // THREAD_PREFERRED_PARENT_DISCOVERY_UNICAST_HOOK
++        Mac::ExtAddress discoveryTarget;
++        discoveryTarget.Set(thread_preferred_parent_ot_parent_discovery_extaddr.m8);
++        destination.SetToLinkLocalAddress(discoveryTarget);
++    }
++    else if (aType == kToSelectedRouter)
++    {
++#if OPENTHREAD_FTD && OPENTHREAD_CONFIG_PARENT_SEARCH_ENABLE
+         TxMessage *messageToCurParent = static_cast<TxMessage *>(message->Clone());
+-
+         VerifyOrExit(messageToCurParent != nullptr, error = kErrorNoBufs);
+ 
+         destination.SetToLinkLocalAddress(Get<Mle>().mParent.GetExtAddress());
+         error = messageToCurParent->SendTo(destination);
+-
+         if (error != kErrorNone)
+         {
+             messageToCurParent->Free();
+             ExitNow();
+         }
+-
+         Log(kMessageSend, kTypeParentRequestToRouters, destination);
+ 
+         destination.SetToLinkLocalAddress(Get<Mle>().mParentSearch.GetSelectedParent().GetExtAddress());
++#else
++        // THREAD_PREFERRED_PARENT_SELECTED_PARENT_HOOK
++        // MTD builds do not have ParentSearch, but selected-parent attach still
++        // stores the requested candidate in mParentCandidate.
++        destination.SetToLinkLocalAddress(mParentCandidate.GetExtAddress());
++#endif
+     }
+     else
+-#endif
+     {
+         destination.SetToLinkLocalAllRoutersMulticast();
+     }
+-
++    thread_preferred_parent_ot_notify_parent_req_started();
+     SuccessOrExit(error = message->SendTo(destination));
+-
+-    switch (aType)
++switch (aType)
+     {
+     case kToRouters:
+     case kToSelectedRouter:
+@@ -5231,7 +5499,40 @@
+     }
+ #endif
+ 
+-    aRxInfo.mClass = RxInfo::kAuthoritativeMessage;
++    {
++        otThreadParentResponseInfo parentinfo;
++        parentinfo.mExtAddr = extAddress;
++        parentinfo.mRloc16 = sourceAddress;
++        parentinfo.mRssi = rss;
++        parentinfo.mPriority = connectivityTlv.GetParentPriority();
++        parentinfo.mLinkQuality3 = connectivityTlv.GetLinkQuality3();
++        parentinfo.mLinkQuality2 = connectivityTlv.GetLinkQuality2();
++        parentinfo.mLinkQuality1 = connectivityTlv.GetLinkQuality1();
++        parentinfo.mIsAttached = Get<Mle>().IsAttached();
++        thread_preferred_parent_ot_notify_parent_response(&parentinfo);
++    }
++
++    if (thread_preferred_parent_ot_parent_discovery_active &&
++        thread_preferred_parent_ot_parent_discovery_target_valid &&
++        !(extAddress == AsCoreType(&thread_preferred_parent_ot_parent_discovery_target_extaddr)))
++    {
++        // THREAD_PREFERRED_PARENT_SELECTED_PARENT_RESPONSE_FILTER
++        // During targeted discovery, keep OpenThread's internal candidate state
++        // from drifting toward non-target responders. ESPHome still sees/logs
++        // every response through the callback above, so this remains
++        // non-disruptive to the current connection while constraining the
++        // discovery state to the requested target only.
++        LogNote("SelectedParent discovery ignored non-target src=0x%04x", sourceAddress);
++        ExitNow(error = kErrorDrop);
++    }
++
++    if ((mMode == kSelectedParent) && !(extAddress == mParentCandidate.GetExtAddress()))
++    {
++        // THREAD_PREFERRED_PARENT_SELECTED_PARENT_RESPONSE_FILTER
++        LogNote("SelectedParent ParentResponse ignored non-target src=0x%04x", sourceAddress);
++        ExitNow(error = kErrorDrop);
++    }
++aRxInfo.mClass = RxInfo::kAuthoritativeMessage;
+ 
+ #if OPENTHREAD_FTD
+     if (Get<Mle>().IsFullThreadDevice() && !Get<Mle>().IsDetached())
+@@ -5275,24 +5576,37 @@
+     if (mParentCandidate.IsStateParentResponse() && (mParentCandidate.GetExtAddress() != extAddress))
+     {
+         // If already have a candidate parent, only seek a better parent
++        // unless this Parent Response is the explicit discovery target.
++        bool bypassBetterParentGate = thread_preferred_parent_ot_parent_discovery_active &&
++                                      thread_preferred_parent_ot_parent_discovery_target_valid &&
++                                      (extAddress == AsCoreType(&thread_preferred_parent_ot_parent_discovery_target_extaddr));
+ 
+-        int compare = 0;
++        if (!bypassBetterParentGate)
++        {
++            int compare = 0;
+ 
+ #if OPENTHREAD_FTD
+-        if (Get<Mle>().IsFullThreadDevice())
+-        {
+-            compare = ComparePartitions(connectivityTlv.IsSingleton(), leaderData, mParentCandidate.mIsSingleton,
+-                                        mParentCandidate.mLeaderData);
+-        }
++            if (Get<Mle>().IsFullThreadDevice())
++            {
++                compare = ComparePartitions(connectivityTlv.IsSingleton(), leaderData, mParentCandidate.mIsSingleton,
++                                            mParentCandidate.mLeaderData);
++            }
+ 
+-        // Only consider partitions that are the same or better
+-        VerifyOrExit(compare >= 0);
++            // Only consider partitions that are the same or better
++            VerifyOrExit(compare >= 0);
+ #endif
+ 
+-        // Only consider better parents if the partitions are the same
+-        if (compare == 0)
++            // Only consider better parents if the partitions are the same
++            if (compare == 0)
++            {
++                VerifyOrExit(IsBetterParent(sourceAddress, twoWayLinkMargin, connectivityTlv, version, cslAccuracy));
++            }
++        }
++        else if (mMode == kBetterParent)
+         {
+-            VerifyOrExit(IsBetterParent(sourceAddress, twoWayLinkMargin, connectivityTlv, version, cslAccuracy));
++            // THREAD_PREFERRED_PARENT_TARGET_BYPASS_BETTER_PARENT_GATE
++            LogNote("SelectedParent ParentResponse bypassed better-parent gate src=0x%04x cand=0x%04x",
++                    sourceAddress, mParentCandidate.GetRloc16());
+         }
+     }
+ 
+--- a/src/core/thread/mle_ftd.cpp
++++ b/src/core/thread/mle_ftd.cpp
+@@ -1480,7 +1480,7 @@
+     if (!child->IsStateValidOrRestoring())
+     {
+         child->SetLastHeard(TimerMilli::GetNow());
+-        child->SetTimeout(Time::MsecToSec(kChildIdRequestTimeout));
++        child->SetTimeout(Time::MsecToSec(kChildIdRequestTimeout + 10000)); // THREAD_PREFERRED_PARENT_DISCOVERY_CONTINUE_HOOK
+     }
+ 
+     aRxInfo.mClass = RxInfo::kPeerMessage;
+--- a/src/core/api/thread_api.cpp
++++ b/src/core/api/thread_api.cpp
+@@ -375,6 +375,180 @@
+     return AsCoreType(aInstance).Get<Mle::Mle>().SearchForBetterParent();
+ }
+ 
++
++using thread_preferred_parent_parent_response_callback_t = void (*)(const otThreadParentResponseInfo *aInfo, void *aContext);
++using thread_preferred_parent_parent_req_started_callback_t = void (*)(void *aContext);
++using thread_preferred_parent_attacher_state_callback_t = void (*)(uint8_t aState, void *aContext);
++
++static thread_preferred_parent_parent_response_callback_t sThreadPreferredParentParentResponseCallback = nullptr;
++static void *sThreadPreferredParentParentResponseCallbackContext = nullptr;
++static thread_preferred_parent_parent_req_started_callback_t sThreadPreferredParentParentReqStartedCallback = nullptr;
++static void *sThreadPreferredParentParentReqStartedCallbackContext = nullptr;
++static thread_preferred_parent_attacher_state_callback_t sThreadPreferredParentAttacherStateCallback = nullptr;
++static void *sThreadPreferredParentAttacherStateCallbackContext = nullptr;
++
++extern "C" void thread_preferred_parent_ot_register_parent_response_callback(
++    thread_preferred_parent_parent_response_callback_t aCallback,
++    void *aContext)
++{
++    // THREAD_PREFERRED_PARENT_PARENT_RESPONSE_REPORTING_HOOK
++    sThreadPreferredParentParentResponseCallback = aCallback;
++    sThreadPreferredParentParentResponseCallbackContext = aContext;
++}
++
++extern "C" void thread_preferred_parent_ot_register_parent_req_started_callback(
++    thread_preferred_parent_parent_req_started_callback_t aCallback,
++    void *aContext)
++{
++    // THREAD_PREFERRED_PARENT_PARENT_REQ_STARTED_HOOK
++    sThreadPreferredParentParentReqStartedCallback = aCallback;
++    sThreadPreferredParentParentReqStartedCallbackContext = aContext;
++}
++
++extern "C" void thread_preferred_parent_ot_register_attacher_state_callback(
++    thread_preferred_parent_attacher_state_callback_t aCallback,
++    void *aContext)
++{
++    // THREAD_PREFERRED_PARENT_ATTACHER_STATE_HOOK
++    sThreadPreferredParentAttacherStateCallback = aCallback;
++    sThreadPreferredParentAttacherStateCallbackContext = aContext;
++}
++
++extern "C" void thread_preferred_parent_ot_notify_parent_response(const otThreadParentResponseInfo *aInfo)
++{
++    // THREAD_PREFERRED_PARENT_PARENT_RESPONSE_REPORTING_HOOK
++    if ((sThreadPreferredParentParentResponseCallback != nullptr) && (aInfo != nullptr))
++    {
++        sThreadPreferredParentParentResponseCallback(aInfo, sThreadPreferredParentParentResponseCallbackContext);
++    }
++}
++
++extern "C" void thread_preferred_parent_ot_notify_parent_req_started(void)
++{
++    // THREAD_PREFERRED_PARENT_PARENT_REQ_STARTED_HOOK
++    if (sThreadPreferredParentParentReqStartedCallback != nullptr)
++    {
++        sThreadPreferredParentParentReqStartedCallback(sThreadPreferredParentParentReqStartedCallbackContext);
++    }
++}
++
++extern "C" void thread_preferred_parent_ot_notify_attacher_state(uint8_t aState)
++{
++    // THREAD_PREFERRED_PARENT_ATTACHER_STATE_HOOK
++    if (sThreadPreferredParentAttacherStateCallback != nullptr)
++    {
++        sThreadPreferredParentAttacherStateCallback(aState, sThreadPreferredParentAttacherStateCallbackContext);
++    }
++}
++
++extern "C" bool thread_preferred_parent_ot_parent_discovery_active = false;
++extern "C" bool thread_preferred_parent_ot_parent_discovery_unicast = false;
++extern "C" otExtAddress thread_preferred_parent_ot_parent_discovery_extaddr = {};
++extern "C" bool thread_preferred_parent_ot_parent_discovery_target_valid = false;
++extern "C" otExtAddress thread_preferred_parent_ot_parent_discovery_target_extaddr = {};
++
++extern "C" otError thread_preferred_parent_ot_set_discovery_target_extaddr(otInstance *aInstance,
++                                                                             const otExtAddress *aPreferredExtAddress)
++{
++    // THREAD_PREFERRED_PARENT_DISCOVERY_TARGET_HINT_HOOK
++    if ((aInstance == nullptr) || (aPreferredExtAddress == nullptr))
++    {
++        return OT_ERROR_INVALID_ARGS;
++    }
++
++    thread_preferred_parent_ot_parent_discovery_target_extaddr = *aPreferredExtAddress;
++    thread_preferred_parent_ot_parent_discovery_target_valid = true;
++    return OT_ERROR_NONE;
++}
++
++extern "C" otError thread_preferred_parent_ot_start_parent_discovery(otInstance *aInstance)
++{
++    // THREAD_PREFERRED_PARENT_DISCOVERY_ONLY_HOOK
++    if (aInstance == nullptr)
++    {
++        return OT_ERROR_INVALID_ARGS;
++    }
++
++    thread_preferred_parent_ot_parent_discovery_active = true;
++    thread_preferred_parent_ot_parent_discovery_unicast = false;
++    otError error = AsCoreType(aInstance).Get<Mle::Mle>().SearchForBetterParent();
++    if (error != OT_ERROR_NONE)
++    {
++        thread_preferred_parent_ot_parent_discovery_active = false;
++        thread_preferred_parent_ot_parent_discovery_unicast = false;
++    }
++    return error;
++}
++
++extern "C" otError thread_preferred_parent_ot_start_parent_discovery_unicast(otInstance *aInstance,
++                                                                               const otExtAddress *aPreferredExtAddress)
++{
++    // THREAD_PREFERRED_PARENT_DISCOVERY_UNICAST_HOOK
++    if ((aInstance == nullptr) || (aPreferredExtAddress == nullptr))
++    {
++        return OT_ERROR_INVALID_ARGS;
++    }
++
++    thread_preferred_parent_ot_parent_discovery_extaddr = *aPreferredExtAddress;
++    thread_preferred_parent_ot_parent_discovery_active = true;
++    thread_preferred_parent_ot_parent_discovery_unicast = true;
++    otError error = AsCoreType(aInstance).Get<Mle::Mle>().SearchForBetterParent();
++    if (error != OT_ERROR_NONE)
++    {
++        thread_preferred_parent_ot_parent_discovery_active = false;
++        thread_preferred_parent_ot_parent_discovery_unicast = false;
++    }
++    return error;
++}
++
++extern "C" otError thread_preferred_parent_ot_start_parent_discovery_unicast_now(otInstance *aInstance,
++                                                                                  const otExtAddress *aPreferredExtAddress)
++{
++    // THREAD_PREFERRED_PARENT_DISCOVERY_UNICAST_NOW_HOOK
++    if ((aInstance == nullptr) || (aPreferredExtAddress == nullptr))
++    {
++        return OT_ERROR_INVALID_ARGS;
++    }
++
++    thread_preferred_parent_ot_parent_discovery_extaddr = *aPreferredExtAddress;
++    thread_preferred_parent_ot_parent_discovery_active = true;
++    thread_preferred_parent_ot_parent_discovery_unicast = true;
++
++    otError error = AsCoreType(aInstance).Get<Mle::Mle>().StartParentDiscoveryUnicastNow(
++        AsCoreType(aPreferredExtAddress));
++    if (error != OT_ERROR_NONE)
++    {
++        thread_preferred_parent_ot_parent_discovery_active = false;
++        thread_preferred_parent_ot_parent_discovery_unicast = false;
++    }
++    return error;
++}
++
++extern "C" otError thread_preferred_parent_ot_continue_selected_parent_attach(otInstance *aInstance,
++                                                                               const otExtAddress *aPreferredExtAddress)
++{
++    // THREAD_PREFERRED_PARENT_DISCOVERY_CONTINUE_HOOK
++    if ((aInstance == nullptr) || (aPreferredExtAddress == nullptr))
++    {
++        return OT_ERROR_INVALID_ARGS;
++    }
++
++    return AsCoreType(aInstance).Get<Mle::Mle>().ContinueSelectedParentAttachFromDiscovery(
++        AsCoreType(aPreferredExtAddress));
++}
++
++extern "C" bool thread_preferred_parent_ot_request_selected_parent_attach(otInstance *aInstance,
++                                                                             const otExtAddress *aPreferredExtAddress)
++{
++    // THREAD_PREFERRED_PARENT_SELECTED_PARENT_HOOK
++    if ((aInstance == nullptr) || (aPreferredExtAddress == nullptr))
++    {
++        return false;
++    }
++
++    return AsCoreType(aInstance).Get<Mle::Mle>().AttachToSelectedParent(AsCoreType(aPreferredExtAddress)) == kErrorNone;
++}
++
+ otError otThreadSetEnabled(otInstance *aInstance, bool aEnabled)
+ {
+     Error error = kErrorNone;
